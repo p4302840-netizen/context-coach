@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, ModelUsage, Register } from 'claude-code'
+import type { EngineInterface, ModelUsage, Register, Timer } from 'claude-code'
 
-import type { Advice, Ctx, Handoff, Quota, Spend, Verdict } from '../types'
+import type { Advice, Cache, Ctx, Handoff, Quota, Spend, Verdict } from '../types'
 
 const IDLE: Handoff = { stage: 'idle', note: '' }
 const NO_SPEND: Spend = {
@@ -10,8 +10,9 @@ const NO_SPEND: Spend = {
   cacheRead: 0,
   cacheWrite: 0,
   output: 0,
+  weighted: 0,
   turnId: '',
-  turnTokens: 0,
+  turnWeighted: 0,
 }
 const NO_QUOTA: Quota[] = []
 
@@ -26,8 +27,12 @@ const handoff = atom({ plugin: 'context-coach', key: 'handoff' } as const, IDLE,
   shape: 'handoff-1',
 })
 const spend = atom({ plugin: 'context-coach', key: 'spend' } as const, NO_SPEND, {
-  shape: 'spend-1',
+  shape: 'spend-2',
 })
+const cache = atom({ plugin: 'context-coach', key: 'cache' } as const, null, {
+  shape: 'cache-1',
+})
+const costUsd = atom({ plugin: 'context-coach', key: 'costUsd' } as const, null)
 const quota = atom({ plugin: 'context-coach', key: 'quota' } as const, NO_QUOTA, {
   shape: 'quota-1',
 })
@@ -42,6 +47,11 @@ const isBusy = atom({ plugin: 'context-coach', key: 'isBusy' } as const, false)
 const TOOL = 'mcp__context-coach__advise'
 const HANDOFF_TOOL = 'mcp__context-coach__handoff'
 const DEFAULT_THRESHOLD = 150_000
+// A lapsed cache is worth a warning only over this much context: below it,
+// reading it all again at full price costs little.
+const COLD_MIN = 100_000
+const FIVE_MINUTES = 5 * 60_000
+const HOUR = 60 * 60_000
 // After the person carries on past a compact / new-conversation advice,
 // stay quiet until the context grows this much more.
 const RENUDGE = 50_000
@@ -58,13 +68,26 @@ export const wan = (n: number): string => {
 
 const k = (n: number): string => `${Math.round(n / 1000)}k`
 
-const tokensOf = (u: ModelUsage): number =>
-  u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens + u.output_tokens
+type Usage = ModelUsage & { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number }
+
+// A request priced in plain input tokens, at the API's own ratios: a cache
+// read costs a tenth, a write 1.25 (five minutes) or 2 (an hour), output 5.
+// A write that names no lifetime goes as five minutes, as /cost prices it.
+export const weightOf = (u: Usage): number => {
+  const hour = u.ephemeral_1h_input_tokens ?? 0
+  return (
+    u.input_tokens +
+    u.cache_read_input_tokens * 0.1 +
+    hour * 2 +
+    (u.cache_creation_input_tokens - hour) * 1.25 +
+    u.output_tokens * 5
+  )
+}
 
 // One request's usage added in. A main-thread step of another turn starts
 // that turn's count; a subagent's steps, and a compaction's request (no
 // turn), fold into the turn that is running.
-const tally = (was: Spend, u: ModelUsage, step?: { turnId: string; agentId?: string }): Spend => {
+const tally = (was: Spend, u: Usage, step?: { turnId: string; agentId?: string }): Spend => {
   const isNewTurn = step !== undefined && step.agentId === undefined && step.turnId !== was.turnId
   return {
     requests: was.requests + 1,
@@ -72,24 +95,52 @@ const tally = (was: Spend, u: ModelUsage, step?: { turnId: string; agentId?: str
     cacheRead: was.cacheRead + u.cache_read_input_tokens,
     cacheWrite: was.cacheWrite + u.cache_creation_input_tokens,
     output: was.output + u.output_tokens,
+    weighted: was.weighted + weightOf(u),
     turnId: isNewTurn ? step.turnId : was.turnId,
-    turnTokens: (isNewTurn ? 0 : was.turnTokens) + tokensOf(u),
+    turnWeighted: (isNewTurn ? 0 : was.turnWeighted) + weightOf(u),
   }
+}
+
+/** 15:42, in local time. */
+export const clockTime = (ms: number): string => {
+  const at = new Date(ms)
+  return `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
 }
 
 const QUOTA_NAMES: Record<string, string> = { five_hour: '5小时额度', seven_day: '7天额度' }
 
-/** The usage row: this conversation's tokens, its latest turn's, the plan's windows. */
-export const usageLine = (s: Spend, limits: readonly Quota[], isWorking: boolean): string | null => {
+type UsageView = {
+  spend: Spend
+  limits: readonly Quota[]
+  /** The session's cost estimate; shown only off a subscription (no limits). */
+  costUsd: number | null
+  isWorking: boolean
+  /** When the cache lapses, while it is warm and nothing runs; else null. */
+  warmUntil: number | null
+}
+
+/**
+ * The usage row: this conversation's use in input-priced tokens (and what
+ * it processed in all), its latest turn's, the plan's windows or the cost
+ * estimate, and until when the cache holds.
+ */
+export const usageLine = (u: UsageView): string | null => {
   const parts: string[] = []
+  const s = u.spend
   if (s.requests > 0) {
-    const total = s.input + s.cacheRead + s.cacheWrite + s.output
-    parts.push(`本对话已用 ${wan(total)} token（缓存读 ${wan(s.cacheRead)} · 输出 ${wan(s.output)}）`)
-    if (s.turnTokens > 0) parts.push(`${isWorking ? '本轮' : '上一轮'} ${wan(s.turnTokens)}`)
+    const processed = s.input + s.cacheRead + s.cacheWrite + s.output
+    parts.push(`本对话 ≈ ${wan(Math.round(s.weighted))} token（按输入价折算，实际处理 ${wan(processed)}）`)
+    if (s.turnWeighted > 0) {
+      parts.push(`${u.isWorking ? '本轮' : '上一轮'} ≈ ${wan(Math.round(s.turnWeighted))}`)
+    }
   }
-  for (const limit of limits) {
+  for (const limit of u.limits) {
     parts.push(`${QUOTA_NAMES[limit.kind] ?? '用量上限'} ${limit.percentUsed}%`)
   }
+  if (u.limits.length === 0 && u.costUsd !== null && u.costUsd > 0) {
+    parts.push(`约 $${u.costUsd.toFixed(2)}（估算）`)
+  }
+  if (u.warmUntil !== null) parts.push(`缓存保留到 ${clockTime(u.warmUntil)}`)
   return parts.length > 0 ? parts.join(' · ') : null
 }
 
@@ -160,6 +211,7 @@ const resetAdvice = async ($: EngineInterface): Promise<void> => {
 const afterCompact = async ($: EngineInterface): Promise<void> => {
   await resetAdvice($)
   await update($, ctx, fill => (fill ? { window: fill.window, tokens: null, isCompacted: true } : fill))
+  await update($, cache, () => null)
 }
 
 // A /clear stood: nothing of the old conversation is measured any more.
@@ -167,6 +219,29 @@ const afterClear = async ($: EngineInterface): Promise<void> => {
   await resetAdvice($)
   await update($, ctx, () => null)
   await update($, spend, () => NO_SPEND)
+  await update($, cache, () => null)
+}
+
+// A main-thread request read or wrote the cache: it holds for the lifetime
+// the request's writes named (the shorter, when they named both), and a
+// timer marks it cold once that has passed with no request since.
+let coldTimer: Timer | undefined
+const warmCache = async ($: EngineInterface, u: Usage): Promise<void> => {
+  const was = await read($, cache)
+  const ttlMs =
+    (u.ephemeral_5m_input_tokens ?? 0) > 0
+      ? FIVE_MINUTES
+      : (u.ephemeral_1h_input_tokens ?? 0) > 0
+        ? HOUR
+        : (was?.ttlMs ?? FIVE_MINUTES)
+  const coldAt = (await $.clock.now()) + ttlMs
+  await update($, cache, () => ({ coldAt, ttlMs, isCold: false, isDismissed: false }))
+  coldTimer?.cancel()
+  coldTimer = $.clock.after(ttlMs, () => {
+    update($, cache, c => (c !== null && c.coldAt === coldAt ? { ...c, isCold: true } : c)).catch(
+      err => log($, `cache: failed ${errorText(err)}`),
+    )
+  })
 }
 
 const errorText = (err: unknown): string =>
@@ -338,6 +413,8 @@ export const register: Register = (on, options) => {
       const fill: Ctx = { tokens: e.context.tokens ?? null, window: e.context.window }
       await update($, ctx, () => fill)
     }
+    const cost = e.cost
+    if (e.changed.includes('cost') && cost !== undefined) await update($, costUsd, () => cost.usd)
     if (e.changed.includes('rateLimits')) {
       const limits = e.rateLimits.map(r => ({ ...r }))
       await update($, quota, () => limits)
@@ -440,7 +517,10 @@ export const register: Register = (on, options) => {
   on('turn.step', async function* ($, e, next) {
     const response = yield* next(e)
     const used = response.usage
-    if (used !== null) await update($, spend, was => tally(was ?? NO_SPEND, used, e))
+    if (used !== null) {
+      await update($, spend, was => tally(was ?? NO_SPEND, used, e))
+      if (e.agentId === undefined) await warmCache($, used)
+    }
     return response
   })
 
@@ -507,8 +587,36 @@ export const register: Register = (on, options) => {
       )
     }
 
+    if (await read($, isConfirmingClear)) {
+      return (
+        <Box flexDirection="column">
+          <Text>清空当前对话、开始新对话？之前的内容不会再发给 Claude。</Text>
+          <Box flexDirection="row" gap={1}>
+            <Button
+              key="clear-yes"
+              label="确认，开新对话"
+              variant="primary"
+              onPress={() => later($, 'clear', () => clearNow($))}
+            />
+            <Button
+              key="clear-no"
+              label="取消"
+              onPress={() => update($, isConfirmingClear, () => false)}
+            />
+          </Box>
+        </Box>
+      )
+    }
+
+    const warmth = await read($, cache)
     const line = showUsage
-      ? usageLine(await read($, spend), await read($, quota), e.props.isWorking)
+      ? usageLine({
+          spend: await read($, spend),
+          limits: await read($, quota),
+          costUsd: await read($, costUsd),
+          isWorking: e.props.isWorking,
+          warmUntil: warmth !== null && !warmth.isCold && !e.props.isWorking ? warmth.coldAt : null,
+        })
       : null
     const usage = line === null ? null : <Text dimColor>{line}</Text>
 
@@ -530,6 +638,44 @@ export const register: Register = (on, options) => {
     const hidden = await read($, isHidden)
     const meter = `上下文 ${wan(tokens)} / ${wan(fill?.window ?? 0)}`
     const isOver = tokens >= threshold
+    const focus = given?.focus ?? ''
+
+    // The cache lapsed over a large context: the next message reads it all
+    // again at full price, so this is the moment a new conversation saves most.
+    if (
+      warmth?.isCold === true &&
+      !warmth.isDismissed &&
+      !e.props.isWorking &&
+      tokens >= COLD_MIN
+    ) {
+      return (
+        <Box flexDirection="column">
+          <Text bold>{`缓存已过期 · ${meter}`}</Text>
+          <Text dimColor>
+            {`下一条消息要按全价重读这 ${wan(tokens)} token，比有缓存时贵 10 倍以上。用不到这段对话了，开新对话最省`}
+          </Text>
+          {usage}
+          <Box flexDirection="row" flexWrap="wrap" gap={1}>
+            <Button
+              key="cold-new"
+              label="新对话"
+              variant="primary"
+              onPress={() => update($, isConfirmingClear, () => true)}
+            />
+            <Button
+              key="cold-compact"
+              label="压缩"
+              onPress={() => later($, 'compact', () => compactNow($, focus))}
+            />
+            <Button
+              key="cold-ok"
+              label="知道了"
+              onPress={() => update($, cache, c => (c !== null ? { ...c, isDismissed: true } : c))}
+            />
+          </Box>
+        </Box>
+      )
+    }
 
     if ((!isOver && given === null) || hidden) {
       const quiet = showMeter ? <Text dimColor>{`${meter} · ${wan(threshold)} 时提醒`}</Text> : null
@@ -538,27 +684,6 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column">
           {quiet}
           {usage}
-        </Box>
-      )
-    }
-
-    if (await read($, isConfirmingClear)) {
-      return (
-        <Box flexDirection="column">
-          <Text>清空当前对话、开始新对话？之前的内容不会再发给 Claude。</Text>
-          <Box flexDirection="row" gap={1}>
-            <Button
-              key="clear-yes"
-              label="确认，开新对话"
-              variant="primary"
-              onPress={() => later($, 'clear', () => clearNow($))}
-            />
-            <Button
-              key="clear-no"
-              label="取消"
-              onPress={() => update($, isConfirmingClear, () => false)}
-            />
-          </Box>
         </Box>
       )
     }
@@ -581,7 +706,6 @@ export const register: Register = (on, options) => {
       log($, drawn)
     }
 
-    const focus = given?.focus ?? ''
     const compactButton = (
       <Button
         key="compact"

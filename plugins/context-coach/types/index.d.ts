@@ -9,7 +9,9 @@ export type Ctx = { tokens: number | null; window: number; isCompacted?: boolean
 /**
  * The tokens this conversation's requests used, as the API reported each
  * (subagents' and compactions' included), counted since it opened or was
- * last cleared. `turnTokens` is the latest main-thread turn's part.
+ * last cleared. `weighted` prices every request in plain input tokens:
+ * cache reads at 0.1, cache writes at 1.25 (five minutes) or 2 (an hour),
+ * output at 5. `turnWeighted` is the latest main-thread turn's part of it.
  */
 export type Spend = {
   requests: number
@@ -17,9 +19,17 @@ export type Spend = {
   cacheRead: number
   cacheWrite: number
   output: number
+  weighted: number
   turnId: string
-  turnTokens: number
+  turnWeighted: number
 }
+
+/**
+ * The main thread's prompt cache: it lapses `ttlMs` after the last request
+ * read or wrote it (the lifetime the request's writes named). `isCold` once
+ * that time passed; `isDismissed` when the person waved the warning off.
+ */
+export type Cache = { coldAt: number; ttlMs: number; isCold: boolean; isDismissed: boolean }
 
 /** One of the account's rate-limit windows: `five_hour`, `seven_day`, … */
 export type Quota = { kind: string; percentUsed: number; resetsAt?: string }
@@ -55,6 +65,8 @@ declare module 'claude-code' {
       handoff: Shaped<Handoff>
       spend: Shaped<Spend>
       quota: Shaped<Quota[]>
+      cache: Shaped<Cache | null>
+      costUsd: number | null
       quietUntil: number
       isHidden: boolean
       isConfirmingClear: boolean

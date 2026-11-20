@@ -253,7 +253,7 @@ test("the person's own /compact settles the advice; the size waits for the next 
   expect(await ui.find({ key: 'compact' })).toBe(undefined)
   // The summary's own request is counted.
   expect((await ui.find({ type: 'Text', text: /本对话/ }))?.text).toBe(
-    '本对话已用 15.3万 token（缓存读 15万 · 输出 3000） · 上一轮 15.3万',
+    '本对话 ≈ 3万 token（按输入价折算，实际处理 15.3万） · 上一轮 ≈ 3万',
   )
 
   await $.session.measure(fill(77_000))
@@ -415,7 +415,9 @@ test('a /clear that throws puts /clear in the box', async ($, on) => {
 })
 
 
-const used = (cacheRead: number, cacheWrite: number, input: number, output: number): ModelUsage => ({
+type Used = ModelUsage & { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number }
+
+const used = (cacheRead: number, cacheWrite: number, input: number, output: number): Used => ({
   input_tokens: input,
   cache_read_input_tokens: cacheRead,
   cache_creation_input_tokens: cacheWrite,
@@ -423,7 +425,7 @@ const used = (cacheRead: number, cacheWrite: number, input: number, output: numb
 })
 
 // Stands in for the API: each request answers with the next usage given.
-const api = (on: On, usages: ModelUsage[]) => {
+const api = (on: On, usages: Used[]) => {
   let i = 0
   on('turn.step', async function* (_, e) {
     const u = usages[i++]
@@ -438,15 +440,18 @@ const api = (on: On, usages: ModelUsage[]) => {
   })
 }
 
-test('each request counts as soon as it answers; a new turn starts its own count', async ($, on) => {
+const MINUTE = 60_000
+
+test('each request counts as soon as it answers, priced as input tokens; a new turn starts its own count', async ($, on) => {
   engine(on)
+  mock.clock(on)
+  // Weighted: 12100, 12250, 31125 (a subagent's), 10000.
   api(on, [used(50_000, 2_000, 100, 900), used(60_000, 1_000, 0, 1_000), used(0, 4_500, 500, 5_000), used(100_000, 0, 0, 0)])
   const request = async (turnId: string, agentId?: string) => {
     const stream = $.turn.step({ turnId, index: 0, model: 'claude-opus-5-5', messageCount: 1, ...(agentId ? { agentId } : {}) })
     for await (const _ of stream) {
       // no chunks
     }
-    return stream.result
   }
 
   await $.session.measure(fill(80_000))
@@ -455,25 +460,26 @@ test('each request counts as soon as it answers; a new turn starts its own count
 
   await request('t1')
   expect((await ui.find({ type: 'Text', text: /本对话/ }))?.text).toBe(
-    '本对话已用 5.3万 token（缓存读 5万 · 输出 900） · 本轮 5.3万',
+    '本对话 ≈ 1.2万 token（按输入价折算，实际处理 5.3万） · 本轮 ≈ 1.2万',
   )
   await request('t1')
   // A subagent's request folds into the turn that spawned it.
   await request('x9', 'agent-1')
   expect((await ui.find({ type: 'Text', text: /本对话/ }))?.text).toBe(
-    '本对话已用 12.5万 token（缓存读 11万 · 输出 6900） · 本轮 12.5万',
+    '本对话 ≈ 5.5万 token（按输入价折算，实际处理 12.5万） · 本轮 ≈ 5.5万',
   )
   await request('t2')
   expect((await ui.find({ type: 'Text', text: /本对话/ }))?.text).toBe(
-    '本对话已用 22.5万 token（缓存读 21万 · 输出 6900） · 本轮 10万',
+    '本对话 ≈ 6.5万 token（按输入价折算，实际处理 22.5万） · 本轮 ≈ 1万',
   )
   // The meter stays first.
   expect((await ui.find({ type: 'Text' }))?.text).toBe('上下文 8万 / 100万 · 15万 时提醒')
   await ui.unmount()
 
+  // Idle: the latest turn, and until when the cache holds.
   const idle = await $.ui.mount(band('desktop'))
-  expect((await idle.find({ type: 'Text', text: /本对话/ }))?.text).toBe(
-    '本对话已用 22.5万 token（缓存读 21万 · 输出 6900） · 上一轮 10万',
+  expect((await idle.find({ type: 'Text', text: /本对话/ }))?.text).toMatch(
+    /^本对话 ≈ 6\.5万 token（按输入价折算，实际处理 22\.5万） · 上一轮 ≈ 1万 · 缓存保留到 \d\d:\d\d$/,
   )
   await idle.unmount()
 })
@@ -486,10 +492,25 @@ test("the plan's windows show as they are measured", async ($, on) => {
       { kind: 'five_hour', percentUsed: 23 },
       { kind: 'seven_day', percentUsed: 41.5 },
     ],
-    changed: ['context', 'rateLimits'] as UsageUnit[],
+    cost: { usd: 1.5 },
+    changed: ['context', 'rateLimits', 'cost'] as UsageUnit[],
   })
   const ui = await $.ui.mount(band('terminal'))
+  // On a subscription the plan's windows say it; the dollar estimate stays out.
   expect((await ui.find({ type: 'Text', text: /额度/ }))?.text).toBe('5小时额度 23% · 7天额度 41.5%')
+  await ui.unmount()
+})
+
+test('off a subscription the cost estimate shows instead', async ($, on) => {
+  engine(on)
+  await $.session.measure({
+    context: { tokens: 80_000, window: 1_000_000, percent: 8 },
+    rateLimits: [],
+    cost: { usd: 1.234 },
+    changed: ['context', 'cost'] as UsageUnit[],
+  })
+  const ui = await $.ui.mount(band('desktop'))
+  expect((await ui.find({ type: 'Text', text: /估算/ }))?.text).toBe('约 $1.23（估算）')
   await ui.unmount()
 })
 
@@ -516,6 +537,7 @@ test('a new conversation starts the count over', async ($, on) => {
 
 test('the usage row follows its setting', { options: { showUsage: false } }, async ($, on) => {
   engine(on)
+  mock.clock(on)
   api(on, [used(50_000, 0, 0, 0)])
   await $.session.measure(fill(80_000))
   const stream = $.turn.step({ turnId: 't1', index: 0, model: 'claude-opus-5-5', messageCount: 1 })
@@ -525,5 +547,79 @@ test('the usage row follows its setting', { options: { showUsage: false } }, asy
   const ui = await $.ui.mount(band('desktop'))
   expect(await ui.find({ type: 'Text', text: /本对话/ })).toBe(undefined)
   expect((await ui.find({ type: 'Text' }))?.text).toBe('上下文 8万 / 100万 · 15万 时提醒')
+  await ui.unmount()
+})
+
+test('an hour cache over a large context warns once it lapses, until the next request', async ($, on) => {
+  engine(on)
+  const clock = mock.clock(on)
+  api(on, [
+    { ...used(110_000, 2_000, 0, 500), ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 2_000 },
+    used(112_000, 0, 0, 100),
+  ])
+  const request = async (turnId: string) => {
+    const stream = $.turn.step({ turnId, index: 0, model: 'claude-opus-5-5', messageCount: 1 })
+    for await (const _ of stream) {
+      // no chunks
+    }
+  }
+
+  await $.session.measure(fill(120_000))
+  await request('t1')
+  const ui = await $.ui.mount(band('desktop'))
+  expect((await ui.find({ type: 'Text', text: /缓存保留到/ }))?.text).toMatch(/缓存保留到 \d\d:\d\d$/)
+
+  await clock.advance(59 * MINUTE)
+  expect(await ui.find({ type: 'Text', text: /缓存已过期/ })).toBe(undefined)
+  await clock.advance(2 * MINUTE)
+  expect((await ui.find({ type: 'Text', text: /缓存已过期/ }))?.text).toBe('缓存已过期 · 上下文 12万 / 100万')
+  expect((await ui.find({ type: 'Text', text: /全价/ }))?.text).toBe(
+    '下一条消息要按全价重读这 12万 token，比有缓存时贵 10 倍以上。用不到这段对话了，开新对话最省',
+  )
+  expect(await ui.find({ type: 'Text', text: /缓存保留到/ })).toBe(undefined)
+
+  await $.ui.press({ plugin: 'context-coach', key: 'cold-ok' })
+  expect(await ui.find({ type: 'Text', text: /缓存已过期/ })).toBe(undefined)
+  expect((await ui.find({ type: 'Text' }))?.text).toBe('上下文 12万 / 100万 · 15万 时提醒')
+
+  // The next request warms it again, and the hour it named still holds.
+  await request('t2')
+  await clock.advance(10 * MINUTE)
+  expect(await ui.find({ type: 'Text', text: /缓存已过期/ })).toBe(undefined)
+  expect(await ui.find({ type: 'Text', text: /缓存保留到/ })).not.toBe(undefined)
+  await ui.unmount()
+})
+
+test('a cache that names no lifetime lapses after five minutes; 新对话 asks first', async ($, on) => {
+  engine(on)
+  const clock = mock.clock(on)
+  api(on, [used(110_000, 1_000, 0, 100)])
+  await $.session.measure(fill(110_000))
+  const stream = $.turn.step({ turnId: 't1', index: 0, model: 'claude-opus-5-5', messageCount: 1 })
+  for await (const _ of stream) {
+    // no chunks
+  }
+  const ui = await $.ui.mount(band('desktop'))
+  await clock.advance(5 * MINUTE)
+  expect(await ui.find({ type: 'Text', text: /缓存已过期/ })).not.toBe(undefined)
+
+  await $.ui.press({ plugin: 'context-coach', key: 'cold-new' })
+  expect(await ui.find({ type: 'Text', text: /清空当前对话/ })).not.toBe(undefined)
+  await ui.unmount()
+})
+
+test('a lapsed cache over a small context says nothing', async ($, on) => {
+  engine(on)
+  const clock = mock.clock(on)
+  api(on, [used(60_000, 1_000, 0, 100)])
+  await $.session.measure(fill(70_000))
+  const stream = $.turn.step({ turnId: 't1', index: 0, model: 'claude-opus-5-5', messageCount: 1 })
+  for await (const _ of stream) {
+    // no chunks
+  }
+  const ui = await $.ui.mount(band('desktop'))
+  await clock.advance(10 * MINUTE)
+  expect(await ui.find({ type: 'Text', text: /缓存已过期/ })).toBe(undefined)
+  expect((await ui.find({ type: 'Text' }))?.text).toBe('上下文 7万 / 100万 · 15万 时提醒')
   await ui.unmount()
 })

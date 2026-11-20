@@ -347,6 +347,79 @@ export const titleOf = (text: string): string => {
   return line.length > 30 ? `${line.slice(0, 30)}…` : line
 }
 
+// Text with the tagged blocks that lead it taken off (`<system-reminder>…`
+// the engine puts ahead of a prompt); what is left opens with no tag.
+const LEADING_TAG = /^\s*<([\w-]+)[^>]*>[\s\S]*?<\/\1>/
+
+const untagged = (text: string): string => {
+  let rest = text
+  for (let match = LEADING_TAG.exec(rest); match !== null; match = LEADING_TAG.exec(rest)) {
+    rest = rest.slice(match[0].length)
+  }
+  rest = rest.trim()
+  return rest.startsWith('<') ? '' : rest
+}
+
+// The conversation's first prompt as its transcript holds it: the first user
+// line with plain text, past tool results, commands and reminders (tagged
+// text) and a compaction's summary. A line cut short is skipped.
+export const firstPromptIn = (jsonl: string): string => {
+  for (const line of jsonl.split('\n')) {
+    let row: unknown
+    try {
+      row = JSON.parse(line)
+    } catch {
+      continue
+    }
+    const fields = row as {
+      type?: unknown
+      isMeta?: unknown
+      isCompactSummary?: unknown
+      message?: { content?: unknown }
+    }
+    if (fields.type !== 'user' || fields.isMeta === true || fields.isCompactSummary === true) continue
+    const content = fields.message?.content
+    const texts =
+      typeof content === 'string'
+        ? [content]
+        : Array.isArray(content)
+          ? content
+              .map(block => (block ?? {}) as { type?: unknown; text?: unknown })
+              .filter(block => block.type === 'text' && typeof block.text === 'string')
+              .map(block => block.text as string)
+          : []
+    for (const text of texts) {
+      const clean = untagged(text)
+      if (clean !== '') return clean
+    }
+  }
+  return ''
+}
+
+// A conversation the plugin meets midway (installed or reloaded during it,
+// or resumed from before it kept names) is named from its transcript's head.
+const nameFromTranscript = async ($: EngineInterface): Promise<void> => {
+  try {
+    if ((await read($, title)) !== '') return
+    const { transcriptPath } = await $.session.info()
+    const head = await $.fs.read(transcriptPath, { offset: 0, length: 65_536 })
+    const name = typeof head === 'string' ? titleOf(firstPromptIn(head)) : ''
+    if (name !== '') await update($, title, () => name)
+  } catch (err) {
+    log($, `title: not read ${errorText(err)}`)
+  }
+}
+
+// The band is drawn again when a value it read changes, but not while a
+// turn streams on every surface: ask for it, at most ten times a second.
+const redraw = ($: EngineInterface): void => {
+  try {
+    $.ui.invalidate('ui.render')
+  } catch (err) {
+    log($, `redraw: ${errorText(err)}`)
+  }
+}
+
 // Every conversation's records of `date`, summed.
 const dayTotal = async ($: EngineInterface, date: string): Promise<number> => {
   let sum = 0
@@ -826,6 +899,7 @@ export const register: Register = (on, options) => {
       log($, `command: not registered ${errorText(err)}`)
     }
     await restoreUsage($)
+    await nameFromTranscript($)
 
     return next(e)
   })
@@ -940,6 +1014,7 @@ export const register: Register = (on, options) => {
     if (used !== undefined) {
       await update($, spend, was => tally(was ?? NO_SPEND, used))
       await saveUsage($, used)
+      redraw($)
     }
 
     return done
@@ -953,6 +1028,7 @@ export const register: Register = (on, options) => {
       await update($, spend, was => tally(was ?? NO_SPEND, used, e))
       await saveUsage($, used)
       if (e.agentId === undefined) await warmCache($, used)
+      redraw($)
     }
     return response
   })

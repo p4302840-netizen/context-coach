@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { dayOf, titleOf } from './register'
+import { dayOf, firstPromptIn, titleOf } from './register'
 import type { ModelUsage, On, SessionContextBreakdown, UsageUnit } from 'claude-code'
 
 const TOOL = 'mcp__context-coach__advise'
@@ -827,6 +827,7 @@ const typedCommand = (command: string) => ({
   presentation: { isFullscreen: false, columns: 80 },
 })
 
+const NL = String.fromCharCode(10)
 const TODAY = dayOf(0)
 const YESTERDAY = dayOf(-24 * 60 * MINUTE)
 
@@ -905,4 +906,35 @@ test('/context-coach with nothing recorded says so, in English too', { options: 
   memoryStore(on, [])
   const ran = await $.command.run(typedCommand('context-coach'))
   expect(ran.text).toBe('No usage recorded yet. Requests count from when context-coach was installed.')
+})
+
+
+test("a conversation met midway is named from its transcript's first prompt", ZH, async () => {
+  const jsonl = [
+    JSON.stringify({ type: 'summary', summary: 'x' }),
+    JSON.stringify({ type: 'user', isMeta: true, message: { role: 'user', content: '<local-command-caveat>x</local-command-caveat>' } }),
+    JSON.stringify({ type: 'user', message: { role: 'user', content: '<command-name>/model</command-name>' } }),
+    JSON.stringify({ type: 'user', isCompactSummary: true, message: { role: 'user', content: 'This session is being continued' } }),
+    JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: 'ok' }] } }),
+    JSON.stringify({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          { type: 'text', text: '<system-reminder>' + NL + 'The user started this session' + NL + '</system-reminder>' },
+          { type: 'text', text: '怎么看我每日消耗的token' },
+        ],
+      },
+    }),
+    JSON.stringify({ type: 'user', message: { role: 'user', content: '看完了' } }),
+    '{"type":"user","message":{"ro',
+  ].join('\n')
+  expect(firstPromptIn(jsonl)).toBe('怎么看我每日消耗的token')
+  expect(firstPromptIn('{"type":"user","mess')).toBe('')
+  // A reminder ahead of the prompt in the same text.
+  const inline = JSON.stringify({
+    type: 'user',
+    message: { role: 'user', content: '<system-reminder>x</system-reminder>' + NL + '<context a="1">y</context>  帮我写周报' },
+  })
+  expect(firstPromptIn(inline)).toBe('帮我写周报')
 })

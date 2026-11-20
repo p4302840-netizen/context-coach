@@ -828,6 +828,16 @@ const typedCommand = (command: string) => ({
 })
 
 const NL = String.fromCharCode(10)
+const NO_SPEND_FOR_TESTS = {
+  requests: 0,
+  input: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  output: 0,
+  weighted: 0,
+  turnId: '',
+  turnWeighted: 0,
+}
 const TODAY = dayOf(0)
 const YESTERDAY = dayOf(-24 * 60 * MINUTE)
 
@@ -937,4 +947,31 @@ test("a conversation met midway is named from its transcript's first prompt", ZH
     message: { role: 'user', content: '<system-reminder>x</system-reminder>' + NL + '<context a="1">y</context>  帮我写周报' },
   })
   expect(firstPromptIn(inline)).toBe('帮我写周报')
+})
+
+
+test('the transcript names the conversation over a name saved before', ZH, async ($, on) => {
+  engine(on)
+  mock.clock(on)
+  const store = memoryStore(on, [
+    ['spend:s1', { ...NO_SPEND_FOR_TESTS, requests: 3, weighted: 30_000, title: '继续' }],
+  ])
+  api(on, [used(50_000, 2_000, 100, 900)])
+  on('session.id', () => ({ value: 's1' }))
+  on('session.info', () => ({ value: { transcriptPath: '/t.jsonl' } as never }))
+  on('fs.read', () => ({
+    value: JSON.stringify({ type: 'user', message: { role: 'user', content: '修好压缩按钮' } }),
+  }))
+  on('tool.register', () => ({ value: { tool: TOOL } }))
+  on('command.register', () => ({ value: { command: 'context-coach' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const stream = $.turn.step({ turnId: 't1', index: 0, model: 'claude-opus-5-5', messageCount: 1 })
+  for await (const _ of stream) {
+    // no chunks
+  }
+  expect((store.get(`day:${TODAY}:s1`) as { title: string }).title).toBe('修好压缩按钮')
+  expect((store.get('spend:s1') as { title: string; requests: number }).title).toBe('修好压缩按钮')
+  expect((store.get('spend:s1') as { requests: number }).requests).toBe(4)
 })

@@ -396,11 +396,11 @@ export const firstPromptIn = (jsonl: string): string => {
   return ''
 }
 
-// A conversation the plugin meets midway (installed or reloaded during it,
-// or resumed from before it kept names) is named from its transcript's head.
+// A conversation is named from its transcript's head whenever the plugin
+// starts in it (installed or reloaded midway, or resumed): that beats a name
+// saved before, which may be a later prompt an older version took.
 const nameFromTranscript = async ($: EngineInterface): Promise<void> => {
   try {
-    if ((await read($, title)) !== '') return
     const { transcriptPath } = await $.session.info()
     const head = await $.fs.read(transcriptPath, { offset: 0, length: 65_536 })
     const name = typeof head === 'string' ? titleOf(firstPromptIn(head)) : ''
@@ -464,7 +464,9 @@ const restoreUsage = async ($: EngineInterface): Promise<void> => {
     if (isSpend(saved)) {
       await update($, spend, was => (was === undefined || was.requests === 0 ? saved : was))
       const name = (saved as { title?: unknown }).title
-      if (typeof name === 'string' && name !== '') await update($, title, () => name)
+      if (typeof name === 'string' && name !== '' && (await read($, title)) === '') {
+        await update($, title, () => name)
+      }
     }
     const keys = await $.store.keys()
     const kept = keys.filter(key => key.startsWith('spend:'))
@@ -898,8 +900,8 @@ export const register: Register = (on, options) => {
     } catch (err) {
       log($, `command: not registered ${errorText(err)}`)
     }
-    await restoreUsage($)
     await nameFromTranscript($)
+    await restoreUsage($)
 
     return next(e)
   })

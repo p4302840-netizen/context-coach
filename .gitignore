@@ -1,0 +1,4 @@
+debug.log
+node_modules/
+# Laid in by Claude Code when it loads the plugin from a folder
+plugins/*/.claude-plugin/types/

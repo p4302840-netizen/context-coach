@@ -1,0 +1,46 @@
+{
+  "name": "context-coach",
+  "version": "0.2.0",
+  "description": "Shows context size and live token usage above the prompt; past a threshold, Claude says whether to wait, compact or start a new conversation (with a handoff note), with one-click buttons.",
+  "author": {
+    "name": "p4302840-netizen",
+    "url": "https://github.com/p4302840-netizen"
+  },
+  "homepage": "https://github.com/p4302840-netizen/context-coach",
+  "repository": "https://github.com/p4302840-netizen/context-coach",
+  "license": "MIT",
+  "keywords": [
+    "context",
+    "compact",
+    "token",
+    "usage",
+    "handoff"
+  ],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "threshold": {
+      "type": "number",
+      "title": "提醒阈值（token）",
+      "description": "上下文超过这个 token 数后，Claude 会在每轮结束时判断：等任务做完、压缩、还是开新对话。",
+      "default": 150000
+    },
+    "showMeter": {
+      "type": "boolean",
+      "title": "一直显示上下文用量",
+      "description": "没到阈值时也在输入框上方显示当前上下文大小。",
+      "default": true
+    },
+    "showUsage": {
+      "type": "boolean",
+      "title": "显示 token 用量",
+      "description": "在输入框上方实时显示本对话已用的 token、本轮用量和套餐额度百分比。",
+      "default": true
+    },
+    "debug": {
+      "type": "boolean",
+      "title": "调试日志",
+      "description": "把每次点击和每一步结果写进插件文件夹里的 debug.log，排查按钮没反应时用。",
+      "default": false
+    }
+  }
+}

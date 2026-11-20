@@ -1,0 +1,15 @@
+{
+  "name": "context-coach",
+  "description": "context-coach: live context size and token usage above the Claude Code prompt, with advice on when to compact or start a new conversation.",
+  "owner": {
+    "name": "p4302840-netizen",
+    "url": "https://github.com/p4302840-netizen"
+  },
+  "plugins": [
+    {
+      "name": "context-coach",
+      "source": "./plugins/context-coach",
+      "description": "Shows context size and live token usage above the prompt; past a threshold, Claude says whether to wait, compact or start a new conversation (with a handoff note), with one-click buttons."
+    }
+  ]
+}

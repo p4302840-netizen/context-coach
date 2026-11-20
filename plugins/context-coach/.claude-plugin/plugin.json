@@ -1,6 +1,6 @@
 {
   "name": "context-coach",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Shows context size and live token usage above the prompt; past a threshold, Claude says whether to wait, compact or start a new conversation (with a handoff note), with one-click buttons.",
   "author": {
     "name": "p4302840-netizen",
@@ -24,6 +24,12 @@
       "description": "上下文超过这个 token 数后，Claude 会在每轮结束时判断：等任务做完、压缩、还是开新对话。",
       "default": 150000
     },
+    "quotaAlert": {
+      "type": "number",
+      "title": "额度高时提前提醒（%） / Early reminder at plan usage (%)",
+      "description": "5 小时额度用到这个百分比后，提醒阈值降到三分之二。0 表示关闭。Once the five-hour limit is this much used, the reminder starts at two thirds of the threshold; 0 turns it off.",
+      "default": 80
+    },
     "showMeter": {
       "type": "boolean",
       "title": "一直显示上下文用量",
@@ -41,6 +47,12 @@
       "title": "调试日志",
       "description": "把每次点击和每一步结果写进插件文件夹里的 debug.log，排查按钮没反应时用。",
       "default": false
+    },
+    "language": {
+      "type": "string",
+      "title": "界面语言 / Language",
+      "description": "auto（跟随系统）、zh（中文）或 en（English）。auto follows the system locale; zh or en picks one.",
+      "default": "auto"
     }
   }
 }

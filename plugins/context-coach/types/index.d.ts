@@ -34,6 +34,18 @@ export type Cache = { coldAt: number; ttlMs: number; isCold: boolean; isDismisse
 /** One of the account's rate-limit windows: `five_hour`, `seven_day`, … */
 export type Quota = { kind: string; percentUsed: number; resetsAt?: string }
 
+/**
+ * What the context window holds, as /context breaks it down: its rows
+ * (largest first) and the three connectors whose tools take the most.
+ * `isFailed` when the breakdown could not be read.
+ */
+export type Details = {
+  total: number
+  rows: { name: string; tokens: number }[]
+  servers: { name: string; tokens: number }[]
+  isFailed: boolean
+}
+
 /** What Claude judged at the end of a turn past the threshold. */
 export type Verdict = 'wait' | 'compact' | 'new_session'
 
@@ -66,7 +78,9 @@ declare module 'claude-code' {
       spend: Shaped<Spend>
       quota: Shaped<Quota[]>
       cache: Shaped<Cache | null>
+      details: Shaped<Details | null>
       costUsd: number | null
+      isDetailsOpen: boolean
       quietUntil: number
       isHidden: boolean
       isConfirmingClear: boolean

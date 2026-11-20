@@ -1,9 +1,11 @@
 import { expect, mock, test } from 'claude-code/testing'
-import type { ModelUsage, On, UsageUnit } from 'claude-code'
+import type { ModelUsage, On, SessionContextBreakdown, UsageUnit } from 'claude-code'
 
 const TOOL = 'mcp__context-coach__advise'
 const HANDOFF = 'mcp__context-coach__handoff'
 const SURFACES = ['terminal', 'desktop'] as const
+// The band's words are pinned to Chinese here; the English ones have their own tests.
+const ZH = { options: { language: 'zh' } }
 
 const band = <S extends 'terminal' | 'desktop'>(surface: S, isWorking = false) => ({
   plugin: 'context-coach',
@@ -37,7 +39,7 @@ const typed = (text: string) => ({
   wait: false,
 })
 
-test('under the threshold the band shows the meter, on every surface', async ($, on) => {
+test('under the threshold the band shows the meter, on every surface', ZH, async ($, on) => {
   engine(on)
   on('tool.register', () => ({ value: { tool: TOOL } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -53,7 +55,7 @@ test('under the threshold the band shows the meter, on every surface', async ($,
   }
 })
 
-test('past the threshold a typed prompt carries the note; under it none', async ($, on) => {
+test('past the threshold a typed prompt carries the note; under it none', ZH, async ($, on) => {
   engine(on)
   const seen: string[][] = []
   on('prompt.submit', (_, e) => {
@@ -72,7 +74,7 @@ test('past the threshold a typed prompt carries the note; under it none', async 
   expect(seen[1]?.[0]).toContain('160k')
 })
 
-test('compact advice is recommended and one press runs /compact with its focus', async ($, on) => {
+test('compact advice is recommended and one press runs /compact with its focus', ZH, async ($, on) => {
   engine(on)
   const clock = mock.clock(on)
   const ran: { command: string; args: string }[] = []
@@ -117,7 +119,7 @@ test('compact advice is recommended and one press runs /compact with its focus',
 
 // A compaction takes about a minute: the press must not wait for it, or the
 // app cuts the press hook off at its 10 s budget.
-test('a press returns at once while /compact still runs', async ($, on) => {
+test('a press returns at once while /compact still runs', ZH, async ($, on) => {
   engine(on)
   const clock = mock.clock(on)
   let finish = () => {}
@@ -146,7 +148,7 @@ test('a press returns at once while /compact still runs', async ($, on) => {
   await ui.unmount()
 })
 
-test('a task still running is told to finish first', async ($, on) => {
+test('a task still running is told to finish first', ZH, async ($, on) => {
   engine(on)
   await $.session.measure(fill(160_000))
   await $.tool.call({ tool: TOOL, verdict: 'wait', reason: '还在改第二个文件' })
@@ -158,7 +160,7 @@ test('a task still running is told to finish first', async ($, on) => {
   await ui.unmount()
 })
 
-test('a new conversation is confirmed first, then runs /clear', async ($, on) => {
+test('a new conversation is confirmed first, then runs /clear', ZH, async ($, on) => {
   engine(on)
   const clock = mock.clock(on)
   let ran: string | undefined
@@ -185,7 +187,7 @@ test('a new conversation is confirmed first, then runs /clear', async ($, on) =>
   await ui.unmount()
 })
 
-test('carrying on past an advice stays quiet for another 50k', async ($, on) => {
+test('carrying on past an advice stays quiet for another 50k', ZH, async ($, on) => {
   engine(on)
   const seen: string[][] = []
   on('prompt.submit', (_, e) => {
@@ -203,13 +205,13 @@ test('carrying on past an advice stays quiet for another 50k', async ($, on) => 
   expect(seen[1]?.length).toBe(1)
 })
 
-test('a verdict outside the three is refused', async ($, on) => {
+test('a verdict outside the three is refused', ZH, async ($, on) => {
   engine(on)
   const told = await $.tool.call({ tool: TOOL, verdict: 'maybe', reason: 'r' })
   expect(told.deny).toContain('verdict')
 })
 
-test('no buttons while a turn runs', async ($, on) => {
+test('no buttons while a turn runs', ZH, async ($, on) => {
   engine(on)
   await $.session.measure(fill(160_000))
   await $.tool.call({ tool: TOOL, verdict: 'compact', reason: 'r' })
@@ -220,7 +222,7 @@ test('no buttons while a turn runs', async ($, on) => {
   await ui.unmount()
 })
 
-test('the threshold follows the setting', { options: { threshold: 100_000 } }, async ($, on) => {
+test('the threshold follows the setting', { options: { language: 'zh', threshold: 100_000 } }, async ($, on) => {
   engine(on)
   await $.session.measure(fill(120_000))
 
@@ -233,7 +235,7 @@ test('the threshold follows the setting', { options: { threshold: 100_000 } }, a
 
 // Core's tokensAfter (here 16k) leaves out the system prompt and tools, so
 // the band shows no number until the next turn's measurement (here 77k).
-test("the person's own /compact settles the advice; the size waits for the next turn", async ($, on) => {
+test("the person's own /compact settles the advice; the size waits for the next turn", ZH, async ($, on) => {
   engine(on)
   on('session.compact', () => ({
     messages: [{ role: 'user' as const, text: 'summary', toolUses: [] }],
@@ -280,7 +282,7 @@ const handoffEngine = (on: On) => {
   return seen
 }
 
-test('a handoff: Claude writes a note, the conversation clears, the note fills the box', async ($, on) => {
+test('a handoff: Claude writes a note, the conversation clears, the note fills the box', ZH, async ($, on) => {
   engine(on)
   const clock = mock.clock(on)
   const seen = handoffEngine(on)
@@ -313,7 +315,7 @@ test('a handoff: Claude writes a note, the conversation clears, the note fills t
   await ui.unmount()
 })
 
-test('when the box cannot take the note, the band offers to send it', async ($, on) => {
+test('when the box cannot take the note, the band offers to send it', ZH, async ($, on) => {
   engine(on)
   const clock = mock.clock(on)
   const seen = handoffEngine(on)
@@ -335,7 +337,7 @@ test('when the box cannot take the note, the band offers to send it', async ($, 
   await ui.unmount()
 })
 
-test('a turn that ends without a note clears nothing', async ($, on) => {
+test('a turn that ends without a note clears nothing', ZH, async ($, on) => {
   engine(on)
   const clock = mock.clock(on)
   const seen = handoffEngine(on)
@@ -355,13 +357,13 @@ test('a turn that ends without a note clears nothing', async ($, on) => {
   await ui.unmount()
 })
 
-test('the handoff tool refuses a note nobody asked for', async ($, on) => {
+test('the handoff tool refuses a note nobody asked for', ZH, async ($, on) => {
   engine(on)
   const told = await $.tool.call({ tool: HANDOFF, note: 'x' })
   expect(told.deny).toContain('handoff')
 })
 
-test('a /compact that throws shows the reason and puts it in the box', async ($, on) => {
+test('a /compact that throws shows the reason and puts it in the box', ZH, async ($, on) => {
   engine(on)
   const clock = mock.clock(on)
   const filled: string[] = []
@@ -392,7 +394,7 @@ test('a /compact that throws shows the reason and puts it in the box', async ($,
   await ui.unmount()
 })
 
-test('a /clear that throws puts /clear in the box', async ($, on) => {
+test('a /clear that throws puts /clear in the box', ZH, async ($, on) => {
   engine(on)
   const clock = mock.clock(on)
   const filled: string[] = []
@@ -442,7 +444,7 @@ const api = (on: On, usages: Used[]) => {
 
 const MINUTE = 60_000
 
-test('each request counts as soon as it answers, priced as input tokens; a new turn starts its own count', async ($, on) => {
+test('each request counts as soon as it answers, priced as input tokens; a new turn starts its own count', ZH, async ($, on) => {
   engine(on)
   mock.clock(on)
   // Weighted: 12100, 12250, 31125 (a subagent's), 10000.
@@ -484,7 +486,7 @@ test('each request counts as soon as it answers, priced as input tokens; a new t
   await idle.unmount()
 })
 
-test("the plan's windows show as they are measured", async ($, on) => {
+test("the plan's windows show as they are measured", ZH, async ($, on) => {
   engine(on)
   await $.session.measure({
     context: { tokens: 80_000, window: 1_000_000, percent: 8 },
@@ -501,7 +503,7 @@ test("the plan's windows show as they are measured", async ($, on) => {
   await ui.unmount()
 })
 
-test('off a subscription the cost estimate shows instead', async ($, on) => {
+test('off a subscription the cost estimate shows instead', ZH, async ($, on) => {
   engine(on)
   await $.session.measure({
     context: { tokens: 80_000, window: 1_000_000, percent: 8 },
@@ -514,7 +516,7 @@ test('off a subscription the cost estimate shows instead', async ($, on) => {
   await ui.unmount()
 })
 
-test('a new conversation starts the count over', async ($, on) => {
+test('a new conversation starts the count over', ZH, async ($, on) => {
   engine(on)
   const clock = mock.clock(on)
   api(on, [used(50_000, 0, 0, 0)])
@@ -535,7 +537,7 @@ test('a new conversation starts the count over', async ($, on) => {
   await ui.unmount()
 })
 
-test('the usage row follows its setting', { options: { showUsage: false } }, async ($, on) => {
+test('the usage row follows its setting', { options: { language: 'zh', showUsage: false } }, async ($, on) => {
   engine(on)
   mock.clock(on)
   api(on, [used(50_000, 0, 0, 0)])
@@ -550,7 +552,7 @@ test('the usage row follows its setting', { options: { showUsage: false } }, asy
   await ui.unmount()
 })
 
-test('an hour cache over a large context warns once it lapses, until the next request', async ($, on) => {
+test('an hour cache over a large context warns once it lapses, until the next request', ZH, async ($, on) => {
   engine(on)
   const clock = mock.clock(on)
   api(on, [
@@ -590,7 +592,7 @@ test('an hour cache over a large context warns once it lapses, until the next re
   await ui.unmount()
 })
 
-test('a cache that names no lifetime lapses after five minutes; 新对话 asks first', async ($, on) => {
+test('a cache that names no lifetime lapses after five minutes; 新对话 asks first', ZH, async ($, on) => {
   engine(on)
   const clock = mock.clock(on)
   api(on, [used(110_000, 1_000, 0, 100)])
@@ -608,7 +610,7 @@ test('a cache that names no lifetime lapses after five minutes; 新对话 asks f
   await ui.unmount()
 })
 
-test('a lapsed cache over a small context says nothing', async ($, on) => {
+test('a lapsed cache over a small context says nothing', ZH, async ($, on) => {
   engine(on)
   const clock = mock.clock(on)
   api(on, [used(60_000, 1_000, 0, 100)])
@@ -622,4 +624,179 @@ test('a lapsed cache over a small context says nothing', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /缓存已过期/ })).toBe(undefined)
   expect((await ui.find({ type: 'Text' }))?.text).toBe('上下文 7万 / 100万 · 15万 时提醒')
   await ui.unmount()
+})
+
+
+const withLimit = (tokens: number, fiveHour: number) => ({
+  context: { tokens, window: 1_000_000, percent: Math.round(tokens / 10_000) },
+  rateLimits: [{ kind: 'five_hour', percentUsed: fiveHour }],
+  changed: ['context', 'rateLimits'] as UsageUnit[],
+})
+
+test('a five-hour limit past 80% brings the reminder forward to two thirds', ZH, async ($, on) => {
+  engine(on)
+  const seen: string[][] = []
+  on('prompt.submit', (_, e) => {
+    seen.push([...(e.context ?? [])])
+    return { text: e.text, context: e.context ?? [] }
+  })
+
+  await $.session.measure(withLimit(110_000, 50))
+  const ui = await $.ui.mount(band('desktop'))
+  expect((await ui.find({ type: 'Text' }))?.text).toBe('上下文 11万 / 100万 · 15万 时提醒')
+  await $.prompt.submit(typed('first'))
+  expect(seen[0]).toEqual([])
+
+  await $.session.measure(withLimit(110_000, 85))
+  expect((await ui.find({ type: 'Text' }))?.text).toBe(
+    '上下文 11万 / 100万 · 已超过 10万（5小时额度已用 85%，提前提醒）',
+  )
+  await $.prompt.submit(typed('second'))
+  expect(seen[1]?.[0]).toContain('100k reminder threshold')
+  expect(seen[1]?.[0]).toContain('five-hour plan limit is 85% used')
+  await ui.unmount()
+})
+
+test('the early reminder follows its setting', { options: { language: 'zh', quotaAlert: 0 } }, async ($, on) => {
+  engine(on)
+  await $.session.measure(withLimit(110_000, 95))
+  const ui = await $.ui.mount(band('desktop'))
+  expect((await ui.find({ type: 'Text' }))?.text).toBe('上下文 11万 / 100万 · 15万 时提醒')
+  await ui.unmount()
+})
+
+const breakdown = {
+  totalTokens: 77_000,
+  categories: [
+    { name: 'System prompt', tokens: 10_000, kind: 'used', isDeferred: false, color: 'a' },
+    { name: 'System tools', tokens: 20_000, kind: 'used', isDeferred: false, color: 'a' },
+    { name: 'MCP tools', tokens: 15_000, kind: 'used', isDeferred: false, color: 'a' },
+    { name: 'MCP tools (deferred)', tokens: 40_000, kind: 'deferred', isDeferred: true, color: 'a' },
+    { name: 'Skills', tokens: 2_000, kind: 'used', isDeferred: false, color: 'a' },
+    { name: 'Messages', tokens: 30_000, kind: 'used', isDeferred: false, color: 'a' },
+    { name: 'Free space', tokens: 900_000, kind: 'free', isDeferred: false, color: 'a' },
+  ],
+  mcpTools: [
+    { name: 'mcp__browser__click', serverName: 'browser', tokens: 5_000, isLoaded: true },
+    { name: 'mcp__browser__read', serverName: 'browser', tokens: 4_000, isLoaded: true },
+    { name: 'mcp__docs__write', serverName: 'docs', tokens: 6_000, isLoaded: true },
+    { name: 'mcp__mail__send', serverName: 'mail', tokens: 30_000, isLoaded: false },
+  ],
+} as unknown as SessionContextBreakdown
+
+test('详情 lists what the context holds and the largest connectors', ZH, async ($, on) => {
+  engine(on)
+  const clock = mock.clock(on)
+  on('session.usage', () => ({
+    value: { startedAt: 0, context: { tokens: 77_000, window: 1_000_000, breakdown }, rateLimits: [] },
+  }))
+
+  await $.session.measure(fill(77_000))
+  const ui = await $.ui.mount(band('desktop'))
+  await $.ui.press({ plugin: 'context-coach', key: 'details' })
+  await clock.advance(0)
+  expect((await ui.find({ type: 'Text' }))?.text).toBe('上下文构成（共 7.7万）')
+  expect((await ui.find({ type: 'Text', text: /消息/ }))?.text).toBe(
+    '消息 3万 · 系统工具 2万 · MCP 工具 1.5万 · 系统提示 1万 · 技能 2000',
+  )
+  expect((await ui.find({ type: 'Text', text: /连接器/ }))?.text).toBe(
+    '连接器占用最多：browser 9000 · docs 6000。用不到的关掉，每个新对话都能少这些',
+  )
+
+  await $.ui.press({ plugin: 'context-coach', key: 'details-close' })
+  expect((await ui.find({ type: 'Text' }))?.text).toBe('上下文 7.7万 / 100万 · 15万 时提醒')
+  await ui.unmount()
+})
+
+test('详情 says so when the breakdown cannot be read', ZH, async ($, on) => {
+  engine(on)
+  const clock = mock.clock(on)
+  on('session.usage', () => {
+    throw new Error('not here')
+  })
+  await $.session.measure(fill(77_000))
+  const ui = await $.ui.mount(band('desktop'))
+  await $.ui.press({ plugin: 'context-coach', key: 'details' })
+  await clock.advance(0)
+  expect((await ui.find({ type: 'Text' }))?.text).toBe('没能读取上下文构成')
+  await ui.unmount()
+})
+
+test('a resumed conversation carries on from its saved count; the store keeps the newest 50', ZH, async ($, on) => {
+  engine(on)
+  mock.clock(on)
+  const entries: Record<string, unknown> = {}
+  for (let i = 0; i < 52; i++) entries[`spend:old${i}`] = { requests: 1 }
+  entries['spend:s1'] = {
+    requests: 10,
+    input: 0,
+    cacheRead: 900_000,
+    cacheWrite: 10_000,
+    output: 5_000,
+    weighted: 120_000,
+    turnId: 't9',
+    turnWeighted: 30_000,
+  }
+  // The store, in memory, in insertion order.
+  const store = new Map(Object.entries(entries))
+  const deleted: string[] = []
+  const saved: { key: string; value: unknown }[] = []
+  on('store.get', (_, e) => ({ value: store.get(e.key) }))
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('store.delete', (_, e) => {
+    deleted.push(e.key)
+    store.delete(e.key)
+    return { value: undefined }
+  })
+  on('store.set', (_, e) => {
+    saved.push({ key: e.key, value: e.value })
+    store.set(e.key, e.value)
+    return { value: undefined }
+  })
+  api(on, [used(50_000, 2_000, 100, 900)])
+  on('session.id', () => ({ value: 's1' }))
+  on('tool.register', () => ({ value: { tool: TOOL } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.session.measure(fill(80_000))
+
+  const ui = await $.ui.mount(band('desktop', true))
+  expect((await ui.find({ type: 'Text', text: /本对话/ }))?.text).toBe(
+    '本对话 ≈ 12万 token（按输入价折算，实际处理 91.5万） · 本轮 ≈ 3万',
+  )
+  // 53 kept, 50 stay: the three oldest go.
+  expect(deleted).toEqual(['spend:old0', 'spend:old1', 'spend:old2'])
+
+  const stream = $.turn.step({ turnId: 't10', index: 0, model: 'claude-opus-5-5', messageCount: 1 })
+  for await (const _ of stream) {
+    // no chunks
+  }
+  expect(saved.at(-1)?.key).toBe('spend:s1')
+  expect((saved.at(-1)?.value as { requests: number }).requests).toBe(11)
+  await ui.unmount()
+})
+
+test('in English the band speaks English, with k and M', { options: { language: 'en' } }, async ($, on) => {
+  engine(on)
+  mock.clock(on)
+  api(on, [used(50_000, 2_000, 100, 900)])
+
+  await $.session.measure(fill(80_000))
+  const ui = await $.ui.mount(band('terminal', true))
+  expect((await ui.find({ type: 'Text' }))?.text).toBe('Context 80k / 1M · reminder at 150k')
+  const stream = $.turn.step({ turnId: 't1', index: 0, model: 'claude-opus-5-5', messageCount: 1 })
+  for await (const _ of stream) {
+    // no chunks
+  }
+  expect((await ui.find({ type: 'Text', text: /conversation/ }))?.text).toBe(
+    'This conversation ≈ 12k tokens (input-priced; 53k processed) · this turn ≈ 12k',
+  )
+  await ui.unmount()
+
+  await $.session.measure(fill(160_000))
+  await $.tool.call({ tool: TOOL, verdict: 'compact', reason: 'the next step builds on this' })
+  const over = await $.ui.mount(band('desktop'))
+  expect((await over.find({ type: 'Text' }))?.text).toBe('Compact suggested · Context 160k / 1M')
+  await over.unmount()
 })

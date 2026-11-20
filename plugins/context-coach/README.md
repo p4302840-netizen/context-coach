@@ -11,7 +11,7 @@
 ```
 建议压缩 · 上下文 16.2万 / 100万
 下一步还要接着改这个项目
-本对话 ≈ 61万 token（按输入价折算，实际处理 523万） · 上一轮 ≈ 9.8万 · 5小时额度 23% · 缓存保留到 15:42
+本对话 ≈ 61万 token（按输入价折算，实际处理 523万） · 上一轮 ≈ 9.8万 · 今天 ≈ 230万 · 5小时额度 23% · 缓存保留到 15:42
 [ 压缩 ]  [ 带摘要开新对话 ]  [ 新对话 ]  [ 隐藏 ]  [ 详情 ]
 ```
 
@@ -35,7 +35,7 @@
 **一直显示**
 
 - 上下文大小：`上下文 8万 / 100万 · 15万 时提醒`
-- token 用量，每次请求后立刻更新：本对话和本轮（或上一轮）用了多少，按输入价折算成等效 token，后面附上实际处理的总量
+- token 用量，每次请求后立刻更新：本对话和本轮（或上一轮）用了多少，按输入价折算成等效 token，后面附上实际处理的总量；还有今天所有对话加起来用了多少
 - 套餐额度：订阅用户会看到 5 小时和 7 天额度的已用百分比；按 API 计费的用户会看到估算费用
 - 缓存能保留到几点：在那之前发下一条消息，上下文都按缓存价读取
 - **详情**按钮：列出上下文里都装了什么（消息、系统工具、MCP 工具、技能……），以及哪几个连接器占得最多。用不到的连接器关掉，每个新对话开局都能省下这些
@@ -58,6 +58,23 @@
 
 如果你没理会建议、继续发消息，插件会安静一段时间，直到上下文再涨 5 万 token 才再次提醒。
 
+## 用量记录
+
+在输入框输入 `/context-coach`，列出最近 7 天每天用了多少、今天每个对话各用了多少（对话按你发的第一条消息命名）：
+
+```
+context-coach 用量记录（按输入价折算的 token）
+
+最近 7 天：
+  11-20 今天 ≈ 230万 · 2 个对话
+  11-19 昨天 ≈ 480万 · 5 个对话
+  合计 ≈ 710万
+
+今天的对话：
+  ≈ 150万 · 修好压缩按钮（当前）
+  ≈ 80万 · 帮我写周报
+```
+
 ## 数字怎么看
 
 - **上下文**：下一次请求要发给 Claude 的全部内容，包括系统提示和工具说明。桌面应用里，新对话一开始就有 6 万多
@@ -66,7 +83,7 @@
 - **5小时额度 / 7天额度**：API 报告的套餐已用百分比，只有订阅用户才有
 - **约 $X（估算）**：Claude Code 按标价算的本次会话费用，只在按 API 计费时显示，不是账单
 - **缓存保留到 15:42**：根据最近一次请求和缓存时长（5 分钟或 1 小时，从 API 返回的用量里看出来）算出来的
-- 计数跟着对话走：关掉再恢复的对话会接着之前的数算，`/clear` 后从零开始。插件只保留最近 50 个对话的计数
+- 计数跟着对话走：关掉再恢复的对话会接着之前的数算，`/clear` 后从零开始。插件保留最近 50 个对话的计数和最近 30 天的用量记录
 
 ## 什么时候清理最划算
 
@@ -104,7 +121,7 @@
 
 ## 隐私
 
-插件不联网，不收集也不发送任何数据。用量数字来自 Claude Code 本身。每个对话的计数存在本机的插件存储里，`debug.log` 只在你打开 `debug` 后写在本机。
+插件不联网，不收集也不发送任何数据。用量数字来自 Claude Code 本身。每个对话的计数和每天的用量记录存在本机的插件存储里，`debug.log` 只在你打开 `debug` 后写在本机。
 
 ## 为什么是插件，不是 skill
 
@@ -128,7 +145,7 @@ context-coach is a context coach for Claude Code. Above the prompt it shows, liv
 - the plan's five-hour and seven-day usage on a subscription, or the cost estimate when billed by the API;
 - until when the prompt cache holds.
 
-Past a threshold (150k tokens by default; two thirds of it once the five-hour limit is 80% used), Claude judges at the end of each turn whether to keep going, compact (with what the summary must keep) or start a new conversation, and the band offers one-click buttons: **Compact**, **New with handoff note** (Claude writes a note, the conversation clears, the note waits in the prompt box), **New conversation**, **Hide** and **Details** (what the context holds, and the connectors that take the most). When the cache lapses over a large context, it warns that the next message re-reads it all at full price. The count follows the conversation across resumes.
+Past a threshold (150k tokens by default; two thirds of it once the five-hour limit is 80% used), Claude judges at the end of each turn whether to keep going, compact (with what the summary must keep) or start a new conversation, and the band offers one-click buttons: **Compact**, **New with handoff note** (Claude writes a note, the conversation clears, the note waits in the prompt box), **New conversation**, **Hide** and **Details** (what the context holds, and the connectors that take the most). When the cache lapses over a large context, it warns that the next message re-reads it all at full price. The count follows the conversation across resumes, the usage row adds today's total over every conversation, and `/context-coach` lists the last 7 days and each of today's conversations.
 
 Install with `/plugin install context-coach --marketplace p4302840-netizen/context-coach` (Claude Code 2.1.275 or later). The UI follows the system language (Chinese or English); set `language` to `zh` or `en` to pick one. Other options: `threshold`, `quotaAlert`, `showMeter`, `showUsage`, `debug`.
 

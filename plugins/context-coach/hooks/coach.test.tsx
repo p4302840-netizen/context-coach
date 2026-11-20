@@ -1,4 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
+import { dayOf, titleOf } from './register'
 import type { ModelUsage, On, SessionContextBreakdown, UsageUnit } from 'claude-code'
 
 const TOOL = 'mcp__context-coach__advise'
@@ -772,8 +773,8 @@ test('a resumed conversation carries on from its saved count; the store keeps th
   for await (const _ of stream) {
     // no chunks
   }
-  expect(saved.at(-1)?.key).toBe('spend:s1')
-  expect((saved.at(-1)?.value as { requests: number }).requests).toBe(11)
+  const count = saved.filter(entry => entry.key === 'spend:s1').at(-1)
+  expect((count?.value as { requests: number }).requests).toBe(11)
   await ui.unmount()
 })
 
@@ -799,4 +800,109 @@ test('in English the band speaks English, with k and M', { options: { language: 
   const over = await $.ui.mount(band('desktop'))
   expect((await over.find({ type: 'Text' }))?.text).toBe('Compact suggested · Context 160k / 1M')
   await over.unmount()
+})
+
+
+// The store, in memory, in insertion order, answering the four calls.
+const memoryStore = (on: On, entries: [string, unknown][]) => {
+  const store = new Map<string, unknown>(entries)
+  on('store.get', (_, e) => ({ value: store.get(e.key) }))
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('store.delete', (_, e) => {
+    store.delete(e.key)
+    return { value: undefined }
+  })
+  on('store.set', (_, e) => {
+    store.set(e.key, e.value)
+    return { value: undefined }
+  })
+  return store
+}
+
+// A slash command as the person types it.
+const typedCommand = (command: string) => ({
+  command,
+  args: '',
+  origin: { kind: 'composer' as const },
+  presentation: { isFullscreen: false, columns: 80 },
+})
+
+const TODAY = dayOf(0)
+const YESTERDAY = dayOf(-24 * 60 * MINUTE)
+
+test("today counts every conversation's requests; old days are pruned", ZH, async ($, on) => {
+  engine(on)
+  mock.clock(on)
+  const store = memoryStore(on, [
+    [`day:${TODAY}:other`, { weighted: 50_000, processed: 400_000, requests: 5, title: '写周报' }],
+    ['day:1969-11-01:old', { weighted: 1, processed: 1, requests: 1, title: '' }],
+  ])
+  api(on, [used(50_000, 2_000, 100, 900)])
+  on('session.id', () => ({ value: 's1' }))
+  on('tool.register', () => ({ value: { tool: TOOL } }))
+  on('command.register', () => ({ value: { command: 'context-coach' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('prompt.submit', (_, e) => ({ text: e.text, context: e.context ?? [] }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(store.has('day:1969-11-01:old')).toBe(false)
+  await $.session.measure(fill(80_000))
+  const ui = await $.ui.mount(band('desktop'))
+  expect((await ui.find({ type: 'Text', text: /今天/ }))?.text).toBe('今天 ≈ 5万')
+
+  await $.prompt.submit(typed('  修好\n压缩按钮  '))
+  const stream = $.turn.step({ turnId: 't1', index: 0, model: 'claude-opus-5-5', messageCount: 1 })
+  for await (const _ of stream) {
+    // no chunks
+  }
+  expect((await ui.find({ type: 'Text', text: /本对话/ }))?.text).toMatch(
+    /^本对话 ≈ 1\.2万 token（按输入价折算，实际处理 5\.3万） · 上一轮 ≈ 1\.2万 · 今天 ≈ 6\.2万 · 缓存保留到 \d\d:\d\d$/,
+  )
+  expect(store.get(`day:${TODAY}:s1`)).toEqual({ weighted: 12_100, processed: 53_000, requests: 1, title: '修好 压缩按钮' })
+  await ui.unmount()
+})
+
+test('a conversation is named by its first prompt, one line of 30 characters', ZH, async () => {
+  expect(titleOf('  修好\n压缩按钮  ')).toBe('修好 压缩按钮')
+  expect(titleOf('a'.repeat(40))).toBe(`${'a'.repeat(30)}…`)
+})
+
+test("/context-coach lists the last days and today's conversations", ZH, async ($, on) => {
+  engine(on)
+  mock.clock(on)
+  memoryStore(on, [
+    [`day:${TODAY}:s1`, { weighted: 1_500_000, processed: 9_000_000, requests: 40, title: '修好压缩按钮' }],
+    [`day:${TODAY}:s2`, { weighted: 800_000, processed: 5_000_000, requests: 20, title: '' }],
+    [`day:${YESTERDAY}:s3`, { weighted: 4_800_000, processed: 30_000_000, requests: 90, title: 'x' }],
+    ['day:1969-12-20:s4', { weighted: 300_000, processed: 2_000_000, requests: 9, title: 'y' }],
+    ['spend:s1', { requests: 40 }],
+  ])
+  on('session.id', () => ({ value: 's1' }))
+
+  const ran = await $.command.run(typedCommand('context-coach'))
+  expect(ran.text).toBe(
+    [
+      'context-coach 用量记录（按输入价折算的 token）',
+      '',
+      '最近 7 天：',
+      `  ${TODAY.slice(5)} 今天 ≈ 230万 · 2 个对话`,
+      `  ${YESTERDAY.slice(5)} 昨天 ≈ 480万 · 1 个对话`,
+      '  12-20 ≈ 30万 · 1 个对话',
+      '  合计 ≈ 740万',
+      '',
+      '今天的对话：',
+      '  ≈ 150万 · 修好压缩按钮（当前）',
+      '  ≈ 80万 · （无标题）',
+      '',
+      '只统计装上 context-coach 之后的请求，子代理和压缩的请求也算在内。',
+    ].join('\n'),
+  )
+})
+
+test('/context-coach with nothing recorded says so, in English too', { options: { language: 'en' } }, async ($, on) => {
+  engine(on)
+  mock.clock(on)
+  memoryStore(on, [])
+  const ran = await $.command.run(typedCommand('context-coach'))
+  expect(ran.text).toBe('No usage recorded yet. Requests count from when context-coach was installed.')
 })

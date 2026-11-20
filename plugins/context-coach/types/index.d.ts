@@ -46,6 +46,9 @@ export type Details = {
   isFailed: boolean
 }
 
+/** All conversations' use on one local day, input-priced (Spend's `weighted`). */
+export type Today = { date: string; weighted: number }
+
 /** What Claude judged at the end of a turn past the threshold. */
 export type Verdict = 'wait' | 'compact' | 'new_session'
 
@@ -81,6 +84,8 @@ declare module 'claude-code' {
       details: Shaped<Details | null>
       costUsd: number | null
       isDetailsOpen: boolean
+      today: Shaped<Today | null>
+      title: string
       quietUntil: number
       isHidden: boolean
       isConfirmingClear: boolean

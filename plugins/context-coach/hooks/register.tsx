@@ -7,7 +7,7 @@ import type {
   Timer,
 } from 'claude-code'
 
-import type { Advice, Cache, Ctx, Details, Handoff, Quota, Spend, Verdict } from '../types'
+import type { Advice, Cache, Ctx, Details, Handoff, Quota, Spend, Today, Verdict } from '../types'
 
 const IDLE: Handoff = { stage: 'idle', note: '' }
 const NO_SPEND: Spend = {
@@ -53,6 +53,11 @@ const isConfirmingClear = atom(
 )
 const isBusy = atom({ plugin: 'context-coach', key: 'isBusy' } as const, false)
 const isDetailsOpen = atom({ plugin: 'context-coach', key: 'isDetailsOpen' } as const, false)
+const today = atom({ plugin: 'context-coach', key: 'today' } as const, null, {
+  shape: 'today-1',
+})
+// The conversation's first prompt, cut short: what the history calls it.
+const title = atom({ plugin: 'context-coach', key: 'title' } as const, '')
 
 const TOOL = 'mcp__context-coach__advise'
 const HANDOFF_TOOL = 'mcp__context-coach__handoff'
@@ -68,6 +73,10 @@ const HOUR = 60 * 60_000
 const RENUDGE = 50_000
 // How many conversations' usage the store keeps, newest last.
 const KEPT_SESSIONS = 50
+// How many days of history the store keeps.
+const KEPT_DAYS = 30
+const DAY = 24 * HOUR
+const COMMAND = 'context-coach'
 const VERDICTS: readonly Verdict[] = ['wait', 'compact', 'new_session']
 // Prompts the person sent themselves (typed here, from a phone, or the app).
 const PERSON_ORIGINS = new Set(['composer', 'bridge', 'sdk'])
@@ -169,6 +178,20 @@ const ZH = {
   detailsTitle: (total: string) => `上下文构成（共 ${total}）`,
   category: (name: string) => CATEGORY_ZH[name] ?? name,
   servers: (list: string) => `连接器占用最多：${list}。用不到的关掉，每个新对话都能少这些`,
+  today: (n: string) => `今天 ≈ ${n}`,
+  commandDescription: '查看最近几天和今天各个对话的 token 用量',
+  noHistory: '还没有用量记录。装上 context-coach 之后的请求才会记下来。',
+  historyTitle: 'context-coach 用量记录（按输入价折算的 token）',
+  lastDays: '最近 7 天：',
+  dayRow: (date: string, label: string, n: string, count: number) =>
+    `  ${date}${label} ≈ ${n} · ${count} 个对话`,
+  todayLabel: ' 今天',
+  yesterdayLabel: ' 昨天',
+  total: (n: string) => `  合计 ≈ ${n}`,
+  todaysChats: '今天的对话：',
+  chatRow: (n: string, name: string, isCurrent: boolean) => `  ≈ ${n} · ${name}${isCurrent ? '（当前）' : ''}`,
+  untitled: '（无标题）',
+  historyNote: '只统计装上 context-coach 之后的请求，子代理和压缩的请求也算在内。',
 }
 
 type Words = typeof ZH
@@ -228,6 +251,20 @@ const EN: Words = {
   category: name => name,
   servers: list =>
     `Largest connectors: ${list}. Turning off the ones you don't use saves this in every new conversation.`,
+  today: n => `today ≈ ${n}`,
+  commandDescription: "Token use over the last days, and each of today's conversations",
+  noHistory: 'No usage recorded yet. Requests count from when context-coach was installed.',
+  historyTitle: 'context-coach usage (tokens, input-priced)',
+  lastDays: 'Last 7 days:',
+  dayRow: (date, label, n, count) =>
+    `  ${date}${label} ≈ ${n} · ${count} conversation${count === 1 ? '' : 's'}`,
+  todayLabel: ' today',
+  yesterdayLabel: ' yesterday',
+  total: n => `  Total ≈ ${n}`,
+  todaysChats: "Today's conversations:",
+  chatRow: (n, name, isCurrent) => `  ≈ ${n} · ${name}${isCurrent ? ' (this one)' : ''}`,
+  untitled: '(untitled)',
+  historyNote: "Counts requests since context-coach was installed, subagents' and compactions' included.",
 }
 
 let words: Words = ZH
@@ -277,29 +314,148 @@ const isSpend = (value: unknown): value is Spend => {
 
 const spendKey = (sessionId: string): string => `spend:${sessionId}`
 
-// The count goes to the store after each request, so a resumed conversation
-// (a new process, the same session id) carries on from it.
-const saveSpend = async ($: EngineInterface): Promise<void> => {
+const pad = (n: number): string => String(n).padStart(2, '0')
+
+/** 2026-11-20, the local day `ms` falls on. */
+export const dayOf = (ms: number): string => {
+  const at = new Date(ms)
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`
+}
+
+/** One conversation's use on one day: `day:<date>:<session id>`, one writer each. */
+type DayRecord = { weighted: number; processed: number; requests: number; title: string }
+
+const isDayRecord = (value: unknown): value is DayRecord => {
+  if (typeof value !== 'object' || value === null) return false
+  const fields = value as Record<string, unknown>
+  return (
+    typeof fields.weighted === 'number' &&
+    typeof fields.processed === 'number' &&
+    typeof fields.requests === 'number' &&
+    typeof fields.title === 'string'
+  )
+}
+
+const DAY_KEY = /^day:(\d{4}-\d{2}-\d{2}):(.+)$/
+
+const processedOf = (u: Usage): number =>
+  u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens + u.output_tokens
+
+/** A prompt as the history names its conversation: one line, 30 characters. */
+export const titleOf = (text: string): string => {
+  const line = text.replace(/\s+/g, ' ').trim()
+  return line.length > 30 ? `${line.slice(0, 30)}…` : line
+}
+
+// Every conversation's records of `date`, summed.
+const dayTotal = async ($: EngineInterface, date: string): Promise<number> => {
+  let sum = 0
+  for (const key of await $.store.keys()) {
+    if (!key.startsWith(`day:${date}:`)) continue
+    const record = await $.store.get(key)
+    if (isDayRecord(record)) sum += record.weighted
+  }
+  return sum
+}
+
+// After each request: the conversation's count (so a resumed conversation,
+// a new process under the same session id, carries on from it), its record
+// for today, and today's total over every conversation.
+const saveUsage = async ($: EngineInterface, u: Usage): Promise<void> => {
   try {
-    await $.store.set(spendKey(await $.session.id()), await read($, spend))
+    const id = await $.session.id()
+    const name = await read($, title)
+    await $.store.set(spendKey(id), { ...(await read($, spend)), title: name })
+    const date = dayOf(await $.clock.now())
+    const key = `day:${date}:${id}`
+    const was = await $.store.get(key)
+    const base: DayRecord = isDayRecord(was) ? was : { weighted: 0, processed: 0, requests: 0, title: '' }
+    await $.store.set(key, {
+      weighted: base.weighted + weightOf(u),
+      processed: base.processed + processedOf(u),
+      requests: base.requests + 1,
+      title: name !== '' ? name : base.title,
+    })
+    const sum = await dayTotal($, date)
+    await update($, today, () => ({ date, weighted: sum }))
   } catch (err) {
-    log($, `spend: not saved ${errorText(err)}`)
+    log($, `usage: not saved ${errorText(err)}`)
   }
 }
 
-const restoreSpend = async ($: EngineInterface): Promise<void> => {
+// At the start: a resumed conversation's count and name, today's total so
+// far, and the store pruned to the newest conversations and recent days.
+const restoreUsage = async ($: EngineInterface): Promise<void> => {
   try {
     const saved = await $.store.get(spendKey(await $.session.id()))
     if (isSpend(saved)) {
       await update($, spend, was => (was === undefined || was.requests === 0 ? saved : was))
+      const name = (saved as { title?: unknown }).title
+      if (typeof name === 'string' && name !== '') await update($, title, () => name)
     }
-    const kept = (await $.store.keys()).filter(key => key.startsWith('spend:'))
+    const keys = await $.store.keys()
+    const kept = keys.filter(key => key.startsWith('spend:'))
     for (const key of kept.slice(0, Math.max(0, kept.length - KEPT_SESSIONS))) {
       await $.store.delete(key)
     }
+    const now = await $.clock.now()
+    const oldest = dayOf(now - KEPT_DAYS * DAY)
+    for (const key of keys) {
+      const day = DAY_KEY.exec(key)?.[1]
+      if (day !== undefined && day < oldest) await $.store.delete(key)
+    }
+    const date = dayOf(now)
+    const sum = await dayTotal($, date)
+    if (sum > 0) await update($, today, () => ({ date, weighted: sum }))
   } catch (err) {
-    log($, `spend: not restored ${errorText(err)}`)
+    log($, `usage: not restored ${errorText(err)}`)
   }
+}
+
+// What /context-coach prints: the last 7 days with records, and each of
+// today's conversations, largest first.
+const historyReport = async ($: EngineInterface): Promise<string> => {
+  const w = words
+  const now = await $.clock.now()
+  const todayDate = dayOf(now)
+  const yesterday = dayOf(now - DAY)
+  let current = ''
+  try {
+    current = await $.session.id()
+  } catch {
+    current = ''
+  }
+  const byDay = new Map<string, { weighted: number; count: number }>()
+  const chats: { weighted: number; name: string; isCurrent: boolean }[] = []
+  for (const key of await $.store.keys()) {
+    const match = DAY_KEY.exec(key)
+    if (match === null) continue
+    const [, date = '', id = ''] = match
+    const record = await $.store.get(key)
+    if (!isDayRecord(record)) continue
+    const day = byDay.get(date) ?? { weighted: 0, count: 0 }
+    byDay.set(date, { weighted: day.weighted + record.weighted, count: day.count + 1 })
+    if (date === todayDate) {
+      chats.push({ weighted: record.weighted, name: record.title, isCurrent: id === current })
+    }
+  }
+  if (byDay.size === 0) return w.noHistory
+
+  const days = [...byDay].sort((x, y) => y[0].localeCompare(x[0])).slice(0, 7)
+  const lines = [w.historyTitle, '', w.lastDays]
+  for (const [date, day] of days) {
+    const label = date === todayDate ? w.todayLabel : date === yesterday ? w.yesterdayLabel : ''
+    lines.push(w.dayRow(date.slice(5), label, w.num(Math.round(day.weighted)), day.count))
+  }
+  lines.push(w.total(w.num(Math.round(days.reduce((sum, [, day]) => sum + day.weighted, 0)))))
+  if (chats.length > 0) {
+    lines.push('', w.todaysChats)
+    for (const chat of chats.sort((x, y) => y.weighted - x.weighted)) {
+      lines.push(w.chatRow(w.num(Math.round(chat.weighted)), chat.name || w.untitled, chat.isCurrent))
+    }
+  }
+  lines.push('', w.historyNote)
+  return lines.join('\n')
 }
 
 /** 15:42, in local time. */
@@ -316,6 +472,8 @@ type UsageView = {
   isWorking: boolean
   /** When the cache lapses, while it is warm and nothing runs; else null. */
   warmUntil: number | null
+  /** Every conversation's use today, input-priced; null before any. */
+  todayWeighted?: number | null
 }
 
 /**
@@ -330,6 +488,9 @@ export const usageLine = (u: UsageView, w: Words = words): string | null => {
     const processed = s.input + s.cacheRead + s.cacheWrite + s.output
     parts.push(w.usage(w.num(Math.round(s.weighted)), w.num(processed)))
     if (s.turnWeighted > 0) parts.push(w.turn(u.isWorking, w.num(Math.round(s.turnWeighted))))
+  }
+  if (u.todayWeighted != null && u.todayWeighted > 0) {
+    parts.push(w.today(w.num(Math.round(u.todayWeighted))))
   }
   for (const limit of u.limits) parts.push(w.quota(limit.kind, limit.percentUsed))
   if (u.limits.length === 0 && u.costUsd !== null && u.costUsd > 0) {
@@ -368,6 +529,7 @@ const openDetails = async ($: EngineInterface): Promise<void> => {
       ? detailsOf(breakdown)
       : { total: 0, rows: [], servers: [], isFailed: true }
     await update($, details, () => shown)
+    log($, `details: ${JSON.stringify(shown).slice(0, 800)}`)
   } catch (err) {
     log($, `details: failed ${errorText(err)}`)
     await update($, details, () => ({ total: 0, rows: [], servers: [], isFailed: true }))
@@ -472,6 +634,7 @@ const afterClear = async ($: EngineInterface): Promise<void> => {
   await update($, spend, () => NO_SPEND)
   await update($, cache, () => null)
   await update($, isDetailsOpen, () => false)
+  await update($, title, () => '')
 }
 
 // A main-thread request read or wrote the cache: it holds for the lifetime
@@ -490,6 +653,7 @@ const warmCache = async ($: EngineInterface, u: Usage): Promise<void> => {
   await update($, cache, () => ({ coldAt, ttlMs, isCold: false, isDismissed: false }))
   coldTimer?.cancel()
   coldTimer = $.clock.after(ttlMs, () => {
+    log($, `cache: cold after ${Math.round(ttlMs / 60_000)} min`)
     update($, cache, c => (c !== null && c.coldAt === coldAt ? { ...c, isCold: true } : c)).catch(
       err => log($, `cache: failed ${errorText(err)}`),
     )
@@ -632,6 +796,7 @@ export const register: Register = (on, options) => {
   isLogging = options.debug === true
   words = resolveLang(options.language) === 'en' ? EN : ZH
   let lastDrawn = ''
+  let lastLine = ''
 
   // Every press on this mod's own elements, before its handler runs.
   on('ui.press', ($, e, next) => {
@@ -655,7 +820,12 @@ export const register: Register = (on, options) => {
       inputSchema: HANDOFF_SCHEMA,
       isDeferred: false,
     })
-    await restoreSpend($)
+    try {
+      await $.command.register({ name: COMMAND, description: words.commandDescription })
+    } catch (err) {
+      log($, `command: not registered ${errorText(err)}`)
+    }
+    await restoreUsage($)
 
     return next(e)
   })
@@ -682,6 +852,10 @@ export const register: Register = (on, options) => {
   on('prompt.submit', async ($, e, next) => {
     if (e.command || e.isMeta || !PERSON_ORIGINS.has(e.origin.kind)) return next(e)
 
+    if ((await read($, title)) === '' && e.text.trim() !== '') {
+      const name = titleOf(e.text)
+      await update($, title, () => name)
+    }
     const tokens = (await read($, ctx))?.tokens ?? 0
     const given = await read($, advice)
     if (given && given.verdict !== 'wait') {
@@ -765,7 +939,7 @@ export const register: Register = (on, options) => {
     const used = done.skip === undefined ? done.usage : undefined
     if (used !== undefined) {
       await update($, spend, was => tally(was ?? NO_SPEND, used))
-      await saveSpend($)
+      await saveUsage($, used)
     }
 
     return done
@@ -777,11 +951,14 @@ export const register: Register = (on, options) => {
     const used = response.usage
     if (used !== null) {
       await update($, spend, was => tally(was ?? NO_SPEND, used, e))
-      await saveSpend($)
+      await saveUsage($, used)
       if (e.agentId === undefined) await warmCache($, used)
     }
     return response
   })
+
+  // /context-coach: the usage history.
+  on('command.run', { command: COMMAND }, async $ => ({ text: await historyReport($) }))
 
   on('session.end', async ($, e, next) => {
     if (e.reason === 'clear') await afterClear($)
@@ -914,10 +1091,15 @@ export const register: Register = (on, options) => {
             costUsd: await read($, costUsd),
             isWorking: e.props.isWorking,
             warmUntil: warmth !== null && !warmth.isCold && !e.props.isWorking ? warmth.coldAt : null,
+            todayWeighted: (await read($, today))?.weighted ?? null,
           },
           w,
         )
       : null
+    if (line !== null && line !== lastLine) {
+      lastLine = line
+      log($, `usage row: ${line}`)
+    }
     const usage = line === null ? null : <Text dimColor>{line}</Text>
 
     const fill = await read($, ctx)

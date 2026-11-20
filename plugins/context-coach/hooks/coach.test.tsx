@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { dayOf, firstPromptIn, titleOf } from './register'
+import type { Engine } from 'claude-code/testing'
+import { clockTime, dayOf, firstLineOf, firstPromptIn, titleOf } from './register'
 import type { ModelUsage, On, SessionContextBreakdown, UsageUnit } from 'claude-code'
 
 const TOOL = 'mcp__context-coach__advise'
@@ -466,14 +467,14 @@ test('each request counts as soon as it answers, priced as input tokens; a new t
     '本对话 ≈ 1.2万 token（按输入价折算，实际处理 5.3万） · 本轮 ≈ 1.2万',
   )
   await request('t1')
-  // A subagent's request folds into the turn that spawned it.
+  // A subagent's request folds into the turn that spawned it, and shows apart too.
   await request('x9', 'agent-1')
   expect((await ui.find({ type: 'Text', text: /本对话/ }))?.text).toBe(
-    '本对话 ≈ 5.5万 token（按输入价折算，实际处理 12.5万） · 本轮 ≈ 5.5万',
+    '本对话 ≈ 5.5万 token（按输入价折算，实际处理 12.5万） · 本轮 ≈ 5.5万 · 子代理 ≈ 3.1万',
   )
   await request('t2')
   expect((await ui.find({ type: 'Text', text: /本对话/ }))?.text).toBe(
-    '本对话 ≈ 6.5万 token（按输入价折算，实际处理 22.5万） · 本轮 ≈ 1万',
+    '本对话 ≈ 6.5万 token（按输入价折算，实际处理 22.5万） · 本轮 ≈ 1万 · 子代理 ≈ 3.1万',
   )
   // The meter stays first.
   expect((await ui.find({ type: 'Text' }))?.text).toBe('上下文 8万 / 100万 · 15万 时提醒')
@@ -482,7 +483,7 @@ test('each request counts as soon as it answers, priced as input tokens; a new t
   // Idle: the latest turn, and until when the cache holds.
   const idle = await $.ui.mount(band('desktop'))
   expect((await idle.find({ type: 'Text', text: /本对话/ }))?.text).toMatch(
-    /^本对话 ≈ 6\.5万 token（按输入价折算，实际处理 22\.5万） · 上一轮 ≈ 1万 · 缓存保留到 \d\d:\d\d$/,
+    /^本对话 ≈ 6\.5万 token（按输入价折算，实际处理 22\.5万） · 上一轮 ≈ 1万 · 子代理 ≈ 3\.1万 · 缓存保留到 \d\d:\d\d$/,
   )
   await idle.unmount()
 })
@@ -974,4 +975,276 @@ test('the transcript names the conversation over a name saved before', ZH, async
   expect((store.get(`day:${TODAY}:s1`) as { title: string }).title).toBe('修好压缩按钮')
   expect((store.get('spend:s1') as { title: string; requests: number }).title).toBe('修好压缩按钮')
   expect((store.get('spend:s1') as { requests: number }).requests).toBe(4)
+})
+
+
+// ------------------------------------------------------------ subagents
+
+test("subagents' use shows apart; a count saved before it reads as none", { options: { language: 'en' } }, async ($, on) => {
+  engine(on)
+  mock.clock(on)
+  const store = memoryStore(on, [
+    // Saved by 0.5: no `agents`.
+    ['spend:s1', { ...NO_SPEND_FOR_TESTS, requests: 3, cacheRead: 200_000, weighted: 30_000, turnId: 't1', turnWeighted: 30_000 }],
+  ])
+  // Weighted 31125, a subagent's.
+  api(on, [used(0, 4_500, 500, 5_000)])
+  on('session.id', () => ({ value: 's1' }))
+  on('tool.register', () => ({ value: { tool: TOOL } }))
+  on('command.register', () => ({ value: { command: 'context-coach' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.session.measure(fill(80_000))
+  const ui = await $.ui.mount(band('terminal', true))
+  expect((await ui.find({ type: 'Text', text: /conversation/ }))?.text).toBe(
+    'This conversation ≈ 30k tokens (input-priced; 200k processed) · this turn ≈ 30k',
+  )
+
+  const stream = $.turn.step({ turnId: 'x1', index: 0, model: 'claude-opus-5-5', messageCount: 1, agentId: 'agent-1' })
+  for await (const _ of stream) {
+    // no chunks
+  }
+  expect((await ui.find({ type: 'Text', text: /conversation/ }))?.text).toBe(
+    'This conversation ≈ 61k tokens (input-priced; 210k processed) · this turn ≈ 61k · subagents ≈ 31k · today ≈ 31k',
+  )
+  expect((store.get('spend:s1') as { agents: number }).agents).toBe(31_125)
+  await ui.unmount()
+})
+
+// ---------------------------------------------------------- handoff notes
+
+const HOUR = 60 * MINUTE
+const whenOf = (at: number) => `${dayOf(at).slice(5)} ${clockTime(at)}`
+
+test('a handoff saves its note; /context-coach notes lists them newest first and keeps 20', ZH, async ($, on) => {
+  engine(on)
+  const clock = mock.clock(on)
+  const seen = handoffEngine(on)
+  on('prompt.fill', () => ({ isFilled: true }))
+  const older: [string, unknown][] = []
+  for (let i = 1; i <= 20; i++) {
+    const at = -i * HOUR
+    older.push([`note:${dayOf(at)}:old${i}`, { at, title: i === 2 ? '' : `旧对话 ${i}`, text: `第 ${i} 份${NL}细节` }])
+  }
+  const store = memoryStore(on, older)
+  on('session.id', () => ({ value: 's1' }))
+
+  await $.prompt.submit(typed('给插件加交接功能'))
+  await $.session.measure(fill(160_000))
+  const ui = await $.ui.mount(band('desktop'))
+  await $.ui.press({ plugin: 'context-coach', key: 'handoff' })
+  await $.ui.press({ plugin: 'context-coach', key: 'handoff-yes' })
+  await clock.advance(0)
+  const text = `## 目标：给插件加交接功能${NL}${NL}下一步：试用。`
+  await $.tool.call({ tool: HANDOFF, note: text })
+  await $.turn.complete(turnEnds)
+  await clock.advance(10)
+  expect(seen.ran).toEqual(['clear'])
+  await ui.unmount()
+
+  // Saved under the conversation that wrote it, with its name; the oldest went.
+  const saved = store.get(`note:${dayOf(clock.now())}:s1`) as { at: number; title: string; text: string }
+  expect(saved.title).toBe('给插件加交接功能')
+  expect(saved.text).toBe(text)
+  expect([...store.keys()].filter(key => key.startsWith('note:')).length).toBe(20)
+  expect(store.has(`note:${dayOf(-20 * HOUR)}:old20`)).toBe(false)
+
+  const listed = await $.command.run({ ...typedCommand('context-coach'), args: 'notes' })
+  const rows = [`  1. ${whenOf(saved.at)} · 给插件加交接功能 · 目标：给插件加交接功能`]
+  for (let i = 1; i <= 19; i++) {
+    rows.push(`  ${i + 1}. ${whenOf(-i * HOUR)} · ${i === 2 ? '（无标题）' : `旧对话 ${i}`} · 第 ${i} 份`)
+  }
+  expect(listed.text).toBe(
+    ['context-coach 交接摘要（新的在前，最多存 20 份）', '', ...rows, '', '输入 /context-coach notes 编号 查看全文。'].join(NL),
+  )
+
+  const second = await $.command.run({ ...typedCommand('context-coach'), args: ' notes  2 ' })
+  expect(second.text).toBe([`交接摘要 2 · ${whenOf(-HOUR)} · 旧对话 1`, '', `第 1 份${NL}细节`].join(NL))
+  const first = await $.command.run({ ...typedCommand('context-coach'), args: 'notes 1' })
+  expect(first.text).toBe([`交接摘要 1 · ${whenOf(saved.at)} · 给插件加交接功能`, '', text].join(NL))
+  const missing = await $.command.run({ ...typedCommand('context-coach'), args: 'notes 21' })
+  expect(missing.text).toBe('没有第 21 份交接摘要，现在存了 20 份。')
+})
+
+test('/context-coach notes with none saved says so; other arguments show the usage', { options: { language: 'en' } }, async ($, on) => {
+  engine(on)
+  mock.clock(on)
+  memoryStore(on, [])
+  const hints: (string | undefined)[] = []
+  on('session.id', () => ({ value: 's1' }))
+  on('tool.register', () => ({ value: { tool: TOOL } }))
+  on('command.register', (_, e) => {
+    hints.push(e.argumentHint)
+    return { value: { command: e.name } }
+  })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(hints).toEqual(['[notes [n]]'])
+
+  const run = async (args: string) => (await $.command.run({ ...typedCommand('context-coach'), args })).text
+  const none = 'No handoff notes saved yet. Each "New with handoff note" saves its note here, up to 20.'
+  expect(await run('notes')).toBe(none)
+  expect(await run('NOTES 3')).toBe(none)
+  const usage =
+    'Usage: /context-coach for token use, /context-coach notes for the saved handoff notes, /context-coach notes 2 for the second one in full.'
+  expect(await run('notes two')).toBe(usage)
+  expect(await run('notes 1 2')).toBe(usage)
+  expect(await run('today')).toBe(usage)
+  expect(await run('')).toBe('No usage recorded yet. Requests count from when context-coach was installed.')
+})
+
+test("a note's first line skips blank lines and Markdown marks, 40 characters at most", ZH, async () => {
+  expect(firstLineOf(`${NL}  ${NL}## Goal: ship 0.6${NL}more`)).toBe('Goal: ship 0.6')
+  expect(firstLineOf('- **目标**：发布 `0.6.0`')).toBe('目标：发布 0.6.0')
+  expect(firstLineOf('> 1. 先跑测试')).toBe('先跑测试')
+  expect(firstLineOf('x'.repeat(50))).toBe(`${'x'.repeat(40)}…`)
+  expect(firstLineOf('')).toBe('')
+})
+
+// ----------------------------------------------------------- auto-compact
+
+// An hour-cache request over 150k: the cache holds for an hour.
+const HOUR_CACHE: Used = { ...used(150_000, 2_000, 0, 500), ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 2_000 }
+
+// Stands in for the engine an auto-compaction reaches: turns, prompts,
+// commands (recorded) and toasts (recorded).
+const autoEngine = (on: On, usages: Used[]) => {
+  const seen = { ran: [] as { command: string; args: string }[], toasts: [] as string[] }
+  on('command.run', (_, e) => {
+    seen.ran.push({ command: e.command, args: e.args })
+    return { text: '' }
+  })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('prompt.submit', (_, e) => ({ text: e.text, context: e.context ?? [] }))
+  on('ui.toast', (_, e) => {
+    seen.toasts.push(e.text)
+    return { value: undefined }
+  })
+  api(on, usages)
+  return seen
+}
+
+// One main-loop turn: it starts, makes one request, Claude judges, it ends.
+const turnEndingOn = async ($: Engine, verdict: string | null, turnId = 't1') => {
+  await $.turn.start({ text: 'go', turnId })
+  const stream = $.turn.step({ turnId, index: 0, model: 'claude-opus-5-5', messageCount: 1 })
+  for await (const _ of stream) {
+    // no chunks
+  }
+  if (verdict !== null) await $.tool.call({ tool: TOOL, verdict, reason: 'r', focus: 'keep plan.md' })
+  await $.turn.complete({ ...turnEnds, turnId })
+}
+
+const AUTO = { options: { language: 'zh', autoCompact: 10 } }
+
+test('autoCompact: ten quiet minutes after a compact advice, it compacts with the focus', AUTO, async ($, on) => {
+  engine(on)
+  const clock = mock.clock(on)
+  const seen = autoEngine(on, [HOUR_CACHE])
+  on('agent.list', () => ({ value: [] }))
+
+  await $.session.measure(fill(160_000))
+  await turnEndingOn($, 'compact')
+  const ui = await $.ui.mount(band('desktop'))
+  expect((await ui.find({ type: 'Text', text: /自动压缩/ }))?.text).toBe(
+    `${clockTime(clock.now() + 10 * MINUTE)} 前没有新消息就自动压缩`,
+  )
+
+  await clock.advance(10 * MINUTE - 1)
+  expect(seen.ran).toEqual([])
+  await clock.advance(1)
+  await clock.advance(0)
+  expect(seen.ran).toEqual([{ command: 'compact', args: 'keep plan.md' }])
+  expect(seen.toasts).toEqual(['已经 10 分钟没有新消息，按 Claude 的建议自动压缩'])
+  await ui.unmount()
+})
+
+test('autoCompact: a prompt or a new turn stops it; a slash command starts the minutes over', AUTO, async ($, on) => {
+  engine(on)
+  const clock = mock.clock(on)
+  const seen = autoEngine(on, [HOUR_CACHE, HOUR_CACHE, HOUR_CACHE])
+  on('agent.list', () => ({ value: [] }))
+
+  await $.session.measure(fill(160_000))
+  await turnEndingOn($, 'compact')
+  await clock.advance(5 * MINUTE)
+  await $.prompt.submit(typed('one more thing'))
+  await clock.advance(30 * MINUTE)
+  expect(seen.ran).toEqual([])
+
+  // A turn with no prompt of the person's (a background task's notice).
+  await turnEndingOn($, 'compact', 't2')
+  await clock.advance(5 * MINUTE)
+  await $.turn.start({ text: '', turnId: 't3' })
+  await clock.advance(30 * MINUTE)
+  expect(seen.ran).toEqual([])
+  await $.turn.complete({ ...turnEnds, turnId: 't3' })
+
+  // Typed while the minutes run, /context-coach starts them over.
+  await turnEndingOn($, 'compact', 't4')
+  await clock.advance(8 * MINUTE)
+  await $.prompt.submit({ ...typed('/context-coach'), command: { name: 'context-coach', kind: 'local' } as never })
+  await clock.advance(8 * MINUTE)
+  expect(seen.ran).toEqual([])
+  await clock.advance(2 * MINUTE)
+  await clock.advance(0)
+  expect(seen.ran).toEqual([{ command: 'compact', args: 'keep plan.md' }])
+})
+
+test('autoCompact: never for wait or new_session, nor while a subagent works', AUTO, async ($, on) => {
+  engine(on)
+  const clock = mock.clock(on)
+  const seen = autoEngine(on, [HOUR_CACHE, HOUR_CACHE, HOUR_CACHE])
+  let agents = [{ id: 'a1', description: 'scan', type: 'Explore', status: 'running', kind: 'local_agent', taskStatus: 'running', label: 'scan' }]
+  on('agent.list', () => ({ value: agents as never }))
+
+  await $.session.measure(fill(160_000))
+  await turnEndingOn($, 'wait')
+  await clock.advance(20 * MINUTE)
+  await turnEndingOn($, 'new_session', 't2')
+  await clock.advance(20 * MINUTE)
+  expect(seen.ran).toEqual([])
+
+  await turnEndingOn($, 'compact', 't3')
+  await clock.advance(10 * MINUTE)
+  await clock.advance(0)
+  expect(seen.ran).toEqual([])
+  // It is not tried again until another turn ends.
+  agents = []
+  await clock.advance(30 * MINUTE)
+  expect(seen.ran).toEqual([])
+})
+
+test('autoCompact: not when the cache lapses first', AUTO, async ($, on) => {
+  engine(on)
+  const clock = mock.clock(on)
+  // Five-minute writes: the cache lapses long before ten quiet minutes.
+  const seen = autoEngine(on, [{ ...used(150_000, 2_000, 0, 500), ephemeral_5m_input_tokens: 2_000, ephemeral_1h_input_tokens: 0 }])
+  on('agent.list', () => ({ value: [] }))
+
+  await $.session.measure(fill(160_000))
+  await turnEndingOn($, 'compact')
+  const ui = await $.ui.mount(band('desktop'))
+  expect(await ui.find({ type: 'Text', text: /自动压缩/ })).toBe(undefined)
+  await clock.advance(30 * MINUTE)
+  expect(seen.ran).toEqual([])
+  await ui.unmount()
+})
+
+test('autoCompact is off unless set', ZH, async ($, on) => {
+  engine(on)
+  const clock = mock.clock(on)
+  const seen = autoEngine(on, [HOUR_CACHE])
+  on('agent.list', () => ({ value: [] }))
+
+  await $.session.measure(fill(160_000))
+  await turnEndingOn($, 'compact')
+  const ui = await $.ui.mount(band('desktop'))
+  expect((await ui.find({ type: 'Text', text: /建议压缩/ }))?.text).toBe('建议压缩 · 上下文 16万 / 100万')
+  expect(await ui.find({ type: 'Text', text: /自动压缩/ })).toBe(undefined)
+  await clock.advance(50 * MINUTE)
+  expect(seen.ran).toEqual([])
+  await ui.unmount()
 })

@@ -1,6 +1,6 @@
 {
   "name": "context-coach",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Shows context size and live token usage above the prompt; past a threshold, Claude says whether to wait, compact or start a new conversation (with a handoff note), with one-click buttons.",
   "author": {
     "name": "p4302840-netizen",
@@ -29,6 +29,12 @@
       "title": "额度高时提前提醒（%） / Early reminder at plan usage (%)",
       "description": "5 小时额度用到这个百分比后，提醒阈值降到三分之二。0 表示关闭。Once the five-hour limit is this much used, the reminder starts at two thirds of the threshold; 0 turns it off.",
       "default": 80
+    },
+    "autoCompact": {
+      "type": "number",
+      "title": "空闲后自动压缩（分钟） / Auto-compact when idle (minutes)",
+      "description": "Claude 建议压缩、这一轮已结束、没有任务在跑时，这么多分钟没发消息就自动压缩；必须赶在缓存过期前，所以要比缓存时长短（1 小时缓存填 50 以内，5 分钟缓存填 4 以内）。0 表示关闭。When Claude advised compacting, the turn is over and nothing runs, compact after this many minutes with nothing sent, if that comes before the prompt cache lapses; 0 turns it off.",
+      "default": 0
     },
     "showMeter": {
       "type": "boolean",

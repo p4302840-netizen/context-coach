@@ -11,7 +11,7 @@
 ```
 建议压缩 · 上下文 16.2万 / 100万
 下一步还要接着改这个项目
-本对话 ≈ 61万 token（按输入价折算，实际处理 523万） · 上一轮 ≈ 9.8万 · 今天 ≈ 230万 · 5小时额度 23% · 缓存保留到 15:42
+本对话 ≈ 61万 token（按输入价折算，实际处理 523万） · 上一轮 ≈ 9.8万 · 子代理 ≈ 12万 · 今天 ≈ 230万 · 5小时额度 23% · 缓存保留到 15:42
 [ 压缩 ]  [ 带摘要开新对话 ]  [ 新对话 ]  [ 隐藏 ]  [ 详情 ]
 ```
 
@@ -35,7 +35,7 @@
 **一直显示**
 
 - 上下文大小：`上下文 8万 / 100万 · 15万 时提醒`
-- token 用量，每次请求后立刻更新：本对话和本轮（或上一轮）用了多少，按输入价折算成等效 token，后面附上实际处理的总量；还有今天所有对话加起来用了多少
+- token 用量，每次请求后立刻更新：本对话和本轮（或上一轮）用了多少，按输入价折算成等效 token，后面附上实际处理的总量；其中子代理用了多少（用过子代理才显示）；还有今天所有对话加起来用了多少
 - 套餐额度：订阅用户会看到 5 小时和 7 天额度的已用百分比；按 API 计费的用户会看到估算费用
 - 缓存能保留到几点：在那之前发下一条消息，上下文都按缓存价读取
 - **详情**按钮：列出上下文里都装了什么（消息、系统工具、MCP 工具、技能……），以及哪几个连接器占得最多。用不到的连接器关掉，每个新对话开局都能省下这些
@@ -51,12 +51,41 @@
 ## 按钮
 
 - **压缩**：一键压缩，自动带上 Claude 给的"要保留什么"。压缩后先显示「已压缩」，下一轮结束后再显示新的上下文大小
-- **带摘要开新对话**：先确认。Claude 写一份交接摘要，然后清空对话，把摘要放进新对话的输入框，你看过、改好再发送。如果放不进输入框，上方会出现「放进输入框 / 直接发送 / 丢弃」
+- **带摘要开新对话**：先确认。Claude 写一份交接摘要，然后清空对话，把摘要放进新对话的输入框，你看过、改好再发送。如果放不进输入框，上方会出现「放进输入框 / 直接发送 / 丢弃」。每份摘要都会存下来，见下面的「交接摘要存档」
 - **新对话**：先确认，再清空对话（`/clear`），什么都不带
 - **隐藏**：收起提醒，直到 Claude 下次给出建议
 - **详情**：看上下文构成，再点「收起」回到原来的样子
 
 如果你没理会建议、继续发消息，插件会安静一段时间，直到上下文再涨 5 万 token 才再次提醒。
+
+## 自动压缩（可选，默认关闭）
+
+把 `autoCompact` 设成分钟数（比如 10）就会打开。只有这些条件全满足时才会自动压缩：
+
+- Claude 最近一次的判断是「建议压缩」（「任务还没完成」和「建议开新对话」永远不会自动执行）
+- 这一轮已经结束，没有子代理或别的任务还在跑
+- 你这么多分钟里没发新消息
+- 缓存还没过期：自动压缩要赶在「缓存保留到」那个时间之前，过期后再压缩就得按全价重读整个上下文
+
+等待时提醒下面会多一行「15:52 前没有新消息就自动压缩」。期间你发了新消息或开始新的一轮，就取消；只输入斜杠命令（比如 `/context-coach`）会从头重新计时。压缩时带上 Claude 给的「要保留什么」，和点「压缩」按钮一样。
+
+分钟数要比缓存时长短：订阅用户一般是 1 小时缓存，填 50 以内；5 分钟缓存就填 4 以内，不然缓存总是先过期，自动压缩不会发生。
+
+## 交接摘要存档
+
+每次「带摘要开新对话」写出的摘要都会存在本机，最多 20 份，新的在前。
+
+- `/context-coach notes`：列出存下的摘要，每份一行：日期时间、原来的对话名、摘要第一行
+- `/context-coach notes 2`：打印第 2 份的全文
+
+```
+context-coach 交接摘要（新的在前，最多存 20 份）
+
+  1. 11-20 15:42 · 修好压缩按钮 · 目标：修好桌面应用里的压缩按钮
+  2. 11-19 21:07 · 帮我写周报 · 周报草稿已经写到第三部分
+
+输入 /context-coach notes 编号 查看全文。
+```
 
 ## 用量记录
 
@@ -79,6 +108,7 @@ context-coach 用量记录（按输入价折算的 token）
 
 - **上下文**：下一次请求要发给 Claude 的全部内容，包括系统提示和工具说明。桌面应用里，新对话一开始就有 6 万多
 - **本对话 ≈ X token**：把每次请求按 API 价格折算成普通输入 token 再加起来：缓存读按 1/10 算，缓存写按 1.25 倍（5 分钟缓存）或 2 倍（1 小时缓存）算，输出按 5 倍算。这个数最接近真实消耗。子代理和压缩本身的请求也算在内
+- **子代理 ≈ X**：上面那个数里，子代理的请求占多少，算法一样。子代理每次都从头读自己的上下文，派得多的时候这个数涨得快
 - **实际处理**：所有请求的 token 原样相加。Claude 每调用一次工具就是一次请求，每次都要把整个上下文读一遍，所以这个数很大，其中绝大部分是便宜的缓存读
 - **5小时额度 / 7天额度**：API 报告的套餐已用百分比，只有订阅用户才有
 - **约 $X（估算）**：Claude Code 按标价算的本次会话费用，只在按 API 计费时显示，不是账单
@@ -107,6 +137,7 @@ context-coach 用量记录（按输入价折算的 token）
 
 - `threshold`：提醒阈值，单位 token，默认 150000
 - `quotaAlert`：5 小时额度用到这个百分比后提前提醒（阈值降到三分之二），默认 80，填 0 关闭
+- `autoCompact`：Claude 建议压缩后，空闲这么多分钟就自动压缩（见上面的「自动压缩」），默认 0，即关闭
 - `language`：界面语言，`auto`（跟随系统，默认）、`zh` 或 `en`
 - `showMeter`：没到阈值时也显示上下文大小，默认开启
 - `showUsage`：显示 token 用量、套餐额度和缓存时间，默认开启
@@ -121,7 +152,7 @@ context-coach 用量记录（按输入价折算的 token）
 
 ## 隐私
 
-插件不联网，不收集也不发送任何数据。用量数字来自 Claude Code 本身。每个对话的计数和每天的用量记录存在本机的插件存储里，`debug.log` 只在你打开 `debug` 后写在本机。
+插件不联网，不收集也不发送任何数据。用量数字来自 Claude Code 本身。每个对话的计数、每天的用量记录和最近 20 份交接摘要存在本机的插件存储里，`debug.log` 只在你打开 `debug` 后写在本机。
 
 ## 为什么是插件，不是 skill
 
@@ -141,13 +172,17 @@ claude plugin validate .
 context-coach is a context coach for Claude Code. Above the prompt it shows, live:
 
 - the context size, and when the reminder starts;
-- this conversation's and the latest turn's token use, priced in input tokens (cache reads at a tenth, cache writes at 1.25 or 2, output at 5), beside the raw total processed;
+- this conversation's and the latest turn's token use, priced in input tokens (cache reads at a tenth, cache writes at 1.25 or 2, output at 5), beside the raw total processed, and the subagents' part of it once there is one;
 - the plan's five-hour and seven-day usage on a subscription, or the cost estimate when billed by the API;
 - until when the prompt cache holds.
 
 Past a threshold (150k tokens by default; two thirds of it once the five-hour limit is 80% used), Claude judges at the end of each turn whether to keep going, compact (with what the summary must keep) or start a new conversation, and the band offers one-click buttons: **Compact**, **New with handoff note** (Claude writes a note, the conversation clears, the note waits in the prompt box), **New conversation**, **Hide** and **Details** (what the context holds, and the connectors that take the most). When the cache lapses over a large context, it warns that the next message re-reads it all at full price. The count follows the conversation across resumes, the usage row adds today's total over every conversation, and `/context-coach` lists the last 7 days and each of today's conversations.
 
-Install with `/plugin install context-coach --marketplace p4302840-netizen/context-coach` (Claude Code 2.1.275 or later). The UI follows the system language (Chinese or English); set `language` to `zh` or `en` to pick one. Other options: `threshold`, `quotaAlert`, `showMeter`, `showUsage`, `debug`.
+Every handoff note is saved on this machine, the newest 20 kept: `/context-coach notes` lists them (date and time, the conversation's name, the note's first line) and `/context-coach notes 2` prints the second in full.
+
+Optional auto-compact: set `autoCompact` to a number of minutes (0, the default, is off). When Claude's latest verdict is compact, the turn is over, no subagent or task runs and nothing was sent for that long, the conversation compacts with Claude's focus, as long as that comes before the prompt cache lapses (keep it under the cache's lifetime: under 50 for an hour, under 4 for five minutes). The band says when; a new prompt or turn cancels it, and a slash command starts the minutes over. It never acts on wait or new_session.
+
+Install with `/plugin install context-coach --marketplace p4302840-netizen/context-coach` (Claude Code 2.1.275 or later). The UI follows the system language (Chinese or English); set `language` to `zh` or `en` to pick one. Other options: `threshold`, `quotaAlert`, `autoCompact`, `showMeter`, `showUsage`, `debug`.
 
 ## License
 

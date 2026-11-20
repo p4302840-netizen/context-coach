@@ -11,7 +11,8 @@ export type Ctx = { tokens: number | null; window: number; isCompacted?: boolean
  * (subagents' and compactions' included), counted since it opened or was
  * last cleared. `weighted` prices every request in plain input tokens:
  * cache reads at 0.1, cache writes at 1.25 (five minutes) or 2 (an hour),
- * output at 5. `turnWeighted` is the latest main-thread turn's part of it.
+ * output at 5. `turnWeighted` is the latest main-thread turn's part of it,
+ * `agents` the subagents' part of the whole, priced the same way.
  */
 export type Spend = {
   requests: number
@@ -22,6 +23,7 @@ export type Spend = {
   weighted: number
   turnId: string
   turnWeighted: number
+  agents: number
 }
 
 /**
@@ -86,6 +88,8 @@ declare module 'claude-code' {
       isDetailsOpen: boolean
       today: Shaped<Today | null>
       title: string
+      /** When the `autoCompact` timer runs out, in `$.clock.now()`'s ms; 0 while none waits. */
+      autoCompactAt: number
       quietUntil: number
       isHidden: boolean
       isConfirmingClear: boolean

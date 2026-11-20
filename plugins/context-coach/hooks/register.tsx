@@ -19,6 +19,7 @@ const NO_SPEND: Spend = {
   weighted: 0,
   turnId: '',
   turnWeighted: 0,
+  agents: 0,
 }
 const NO_QUOTA: Quota[] = []
 
@@ -33,7 +34,7 @@ const handoff = atom({ plugin: 'context-coach', key: 'handoff' } as const, IDLE,
   shape: 'handoff-1',
 })
 const spend = atom({ plugin: 'context-coach', key: 'spend' } as const, NO_SPEND, {
-  shape: 'spend-2',
+  shape: 'spend-3',
 })
 const cache = atom({ plugin: 'context-coach', key: 'cache' } as const, null, {
   shape: 'cache-1',
@@ -58,6 +59,8 @@ const today = atom({ plugin: 'context-coach', key: 'today' } as const, null, {
 })
 // The conversation's first prompt, cut short: what the history calls it.
 const title = atom({ plugin: 'context-coach', key: 'title' } as const, '')
+// When the auto-compaction is due; 0 while none is.
+const autoCompactAt = atom({ plugin: 'context-coach', key: 'autoCompactAt' } as const, 0)
 
 const TOOL = 'mcp__context-coach__advise'
 const HANDOFF_TOOL = 'mcp__context-coach__handoff'
@@ -76,6 +79,12 @@ const KEPT_SESSIONS = 50
 // How many days of history the store keeps.
 const KEPT_DAYS = 30
 const DAY = 24 * HOUR
+const MINUTE = 60_000
+// How many handoff notes the store keeps, newest first.
+const KEPT_NOTES = 20
+// An auto-compaction starts at least this long before the cache lapses, so
+// its request still reads the conversation at the cached price.
+const AUTO_MARGIN = 30_000
 const COMMAND = 'context-coach'
 const VERDICTS: readonly Verdict[] = ['wait', 'compact', 'new_session']
 // Prompts the person sent themselves (typed here, from a phone, or the app).
@@ -131,6 +140,7 @@ const ZH = {
   usage: (weighted: string, processed: string) =>
     `本对话 ≈ ${weighted} token（按输入价折算，实际处理 ${processed}）`,
   turn: (isWorking: boolean, n: string) => `${isWorking ? '本轮' : '上一轮'} ≈ ${n}`,
+  agents: (n: string) => `子代理 ≈ ${n}`,
   quota: (kind: string, percent: number) =>
     `${kind === 'five_hour' ? '5小时额度' : kind === 'seven_day' ? '7天额度' : '用量上限'} ${percent}%`,
   cost: (usd: string) => `约 $${usd}（估算）`,
@@ -166,6 +176,8 @@ const ZH = {
   wait: (meter: string) => `${meter} · 任务还没完成，做完后再压缩`,
   suggestCompact: (meter: string) => `建议压缩 · ${meter}`,
   suggestNew: (meter: string) => `建议开新对话 · ${meter}`,
+  autoAt: (at: string) => `${at} 前没有新消息就自动压缩`,
+  autoCompacting: (minutes: string) => `已经 ${minutes} 分钟没有新消息，按 Claude 的建议自动压缩`,
   compact: '压缩',
   handoff: '带摘要开新对话',
   newChat: '新对话',
@@ -179,7 +191,16 @@ const ZH = {
   category: (name: string) => CATEGORY_ZH[name] ?? name,
   servers: (list: string) => `连接器占用最多：${list}。用不到的关掉，每个新对话都能少这些`,
   today: (n: string) => `今天 ≈ ${n}`,
-  commandDescription: '查看最近几天和今天各个对话的 token 用量',
+  commandDescription: '查看最近几天和今天各个对话的 token 用量；加 notes 查看存下的交接摘要',
+  commandHint: '[notes [编号]]',
+  commandUsage:
+    '用法：/context-coach 看用量记录，/context-coach notes 列出存下的交接摘要，/context-coach notes 2 看第 2 份的全文。',
+  noNotes: '还没有存下的交接摘要。用过「带摘要开新对话」后，摘要会存在这里，最多 20 份。',
+  notesTitle: 'context-coach 交接摘要（新的在前，最多存 20 份）',
+  noteRow: (n: number, when: string, name: string, first: string) => `  ${n}. ${when} · ${name} · ${first}`,
+  notesHint: '输入 /context-coach notes 编号 查看全文。',
+  noteHeader: (n: number, when: string, name: string) => `交接摘要 ${n} · ${when} · ${name}`,
+  noSuchNote: (n: string, count: number) => `没有第 ${n} 份交接摘要，现在存了 ${count} 份。`,
   noHistory: '还没有用量记录。装上 context-coach 之后的请求才会记下来。',
   historyTitle: 'context-coach 用量记录（按输入价折算的 token）',
   lastDays: '最近 7 天：',
@@ -201,6 +222,7 @@ const EN: Words = {
   usage: (weighted, processed) =>
     `This conversation ≈ ${weighted} tokens (input-priced; ${processed} processed)`,
   turn: (isWorking, n) => `${isWorking ? 'this turn' : 'last turn'} ≈ ${n}`,
+  agents: n => `subagents ≈ ${n}`,
   quota: (kind, percent) =>
     `${kind === 'five_hour' ? '5-hour limit' : kind === 'seven_day' ? '7-day limit' : 'usage limit'} ${percent}%`,
   cost: usd => `≈ $${usd} (estimate)`,
@@ -238,6 +260,8 @@ const EN: Words = {
   wait: meter => `${meter} · task still running: compact once it's done`,
   suggestCompact: meter => `Compact suggested · ${meter}`,
   suggestNew: meter => `New conversation suggested · ${meter}`,
+  autoAt: at => `Compacts by itself at ${at} unless you send something`,
+  autoCompacting: minutes => `Nothing sent for ${minutes} min: compacting, as Claude suggested`,
   compact: 'Compact',
   handoff: 'New with handoff note',
   newChat: 'New conversation',
@@ -252,7 +276,17 @@ const EN: Words = {
   servers: list =>
     `Largest connectors: ${list}. Turning off the ones you don't use saves this in every new conversation.`,
   today: n => `today ≈ ${n}`,
-  commandDescription: "Token use over the last days, and each of today's conversations",
+  commandDescription:
+    "Token use over the last days, and each of today's conversations; add notes for the saved handoff notes",
+  commandHint: '[notes [n]]',
+  commandUsage:
+    'Usage: /context-coach for token use, /context-coach notes for the saved handoff notes, /context-coach notes 2 for the second one in full.',
+  noNotes: 'No handoff notes saved yet. Each "New with handoff note" saves its note here, up to 20.',
+  notesTitle: 'context-coach handoff notes (newest first, up to 20 kept)',
+  noteRow: (n, when, name, first) => `  ${n}. ${when} · ${name} · ${first}`,
+  notesHint: 'Type /context-coach notes <number> to read one in full.',
+  noteHeader: (n, when, name) => `Handoff note ${n} · ${when} · ${name}`,
+  noSuchNote: (n, count) => `There is no note ${n}: ${count} saved.`,
   noHistory: 'No usage recorded yet. Requests count from when context-coach was installed.',
   historyTitle: 'context-coach usage (tokens, input-priced)',
   lastDays: 'Last 7 days:',
@@ -289,9 +323,11 @@ export const weightOf = (u: Usage): number => {
 
 // One request's usage added in. A main-thread step of another turn starts
 // that turn's count; a subagent's steps, and a compaction's request (no
-// turn), fold into the turn that is running.
+// turn), fold into the turn that is running. A subagent's are kept apart
+// too, in `agents`.
 const tally = (was: Spend, u: Usage, step?: { turnId: string; agentId?: string }): Spend => {
   const isNewTurn = step !== undefined && step.agentId === undefined && step.turnId !== was.turnId
+  const isAgent = step?.agentId !== undefined
   return {
     requests: was.requests + 1,
     input: was.input + u.input_tokens,
@@ -301,12 +337,14 @@ const tally = (was: Spend, u: Usage, step?: { turnId: string; agentId?: string }
     weighted: was.weighted + weightOf(u),
     turnId: isNewTurn ? step.turnId : was.turnId,
     turnWeighted: (isNewTurn ? 0 : was.turnWeighted) + weightOf(u),
+    agents: (was.agents ?? 0) + (isAgent ? weightOf(u) : 0),
   }
 }
 
+// `agents` came in 0.6.0: a count saved before has none, and reads as 0.
 const SPEND_FIELDS = ['requests', 'input', 'cacheRead', 'cacheWrite', 'output', 'weighted', 'turnWeighted']
 
-const isSpend = (value: unknown): value is Spend => {
+const isSpend = (value: unknown): value is Omit<Spend, 'agents'> & { agents?: unknown } => {
   if (typeof value !== 'object' || value === null) return false
   const fields = value as Record<string, unknown>
   return SPEND_FIELDS.every(f => typeof fields[f] === 'number') && typeof fields.turnId === 'string'
@@ -460,10 +498,11 @@ const saveUsage = async ($: EngineInterface, u: Usage): Promise<void> => {
 // far, and the store pruned to the newest conversations and recent days.
 const restoreUsage = async ($: EngineInterface): Promise<void> => {
   try {
-    const saved = await $.store.get(spendKey(await $.session.id()))
-    if (isSpend(saved)) {
+    const stored = await $.store.get(spendKey(await $.session.id()))
+    if (isSpend(stored)) {
+      const saved: Spend = { ...stored, agents: typeof stored.agents === 'number' ? stored.agents : 0 }
       await update($, spend, was => (was === undefined || was.requests === 0 ? saved : was))
-      const name = (saved as { title?: unknown }).title
+      const name = (stored as { title?: unknown }).title
       if (typeof name === 'string' && name !== '' && (await read($, title)) === '') {
         await update($, title, () => name)
       }
@@ -539,6 +578,92 @@ export const clockTime = (ms: number): string => {
   return `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
 }
 
+// ---------------------------------------------------------- handoff notes
+
+/** One handoff note as written: `note:<date>:<session id>`, the newest 20 kept. */
+type NoteRecord = { at: number; title: string; text: string }
+
+const isNoteRecord = (value: unknown): value is NoteRecord => {
+  if (typeof value !== 'object' || value === null) return false
+  const fields = value as Record<string, unknown>
+  return typeof fields.at === 'number' && typeof fields.title === 'string' && typeof fields.text === 'string'
+}
+
+/**
+ * A note's first line with text, 40 characters at most, without Markdown's
+ * marks: a heading's, a quote's or a list item's at its head, bold and code.
+ */
+export const firstLineOf = (text: string): string => {
+  const line =
+    text
+      .split('\n')
+      .map(l =>
+        l
+          .replace(/^\s*(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)*/, '')
+          .replace(/\*\*|__|`/g, '')
+          .trim(),
+      )
+      .find(l => l !== '') ?? ''
+  return line.length > 40 ? `${line.slice(0, 40)}…` : line
+}
+
+// Every saved note, newest first.
+const savedNotes = async ($: EngineInterface): Promise<(NoteRecord & { key: string })[]> => {
+  const found: (NoteRecord & { key: string })[] = []
+  for (const key of await $.store.keys()) {
+    if (!key.startsWith('note:')) continue
+    const record = await $.store.get(key)
+    if (isNoteRecord(record)) found.push({ ...record, key })
+  }
+  return found.sort((x, y) => y.at - x.at)
+}
+
+// The note goes in the store under the conversation that wrote it, before
+// the clear takes its name, and the oldest past the newest 20 go.
+const archiveNote = async ($: EngineInterface, text: string): Promise<void> => {
+  try {
+    const id = await $.session.id()
+    const at = await $.clock.now()
+    await $.store.set(`note:${dayOf(at)}:${id}`, { at, title: await read($, title), text })
+    for (const old of (await savedNotes($)).slice(KEPT_NOTES)) await $.store.delete(old.key)
+  } catch (err) {
+    log($, `note: not saved ${errorText(err)}`)
+  }
+}
+
+const whenOf = (at: number): string => `${dayOf(at).slice(5)} ${clockTime(at)}`
+
+// /context-coach notes: one row a note, numbered from the newest.
+const notesReport = async ($: EngineInterface): Promise<string> => {
+  const w = words
+  const notes = await savedNotes($)
+  if (notes.length === 0) return w.noNotes
+  const rows = notes.map((n, i) => w.noteRow(i + 1, whenOf(n.at), n.title || w.untitled, firstLineOf(n.text)))
+  return [w.notesTitle, '', ...rows, '', w.notesHint].join('\n')
+}
+
+// /context-coach notes 2: that note in full.
+const noteReport = async ($: EngineInterface, which: string): Promise<string> => {
+  const w = words
+  if (!/^\d+$/.test(which)) return w.commandUsage
+  const notes = await savedNotes($)
+  const n = Number(which)
+  const shown = notes[n - 1]
+  if (shown === undefined) return notes.length === 0 ? w.noNotes : w.noSuchNote(which, notes.length)
+  return [w.noteHeader(n, whenOf(shown.at), shown.title || w.untitled), '', shown.text].join('\n')
+}
+
+// What /context-coach answers, by what follows its name.
+const commandReply = async ($: EngineInterface, args: string): Promise<string> => {
+  const [sub, which, ...rest] = args.trim().split(/\s+/).filter(part => part !== '')
+  if (sub === undefined) return historyReport($)
+  const name = sub.toLowerCase()
+  if ((name === 'notes' || name === 'note') && rest.length === 0) {
+    return which === undefined ? notesReport($) : noteReport($, which)
+  }
+  return words.commandUsage
+}
+
 type UsageView = {
   spend: Spend
   limits: readonly Quota[]
@@ -563,6 +688,8 @@ export const usageLine = (u: UsageView, w: Words = words): string | null => {
     const processed = s.input + s.cacheRead + s.cacheWrite + s.output
     parts.push(w.usage(w.num(Math.round(s.weighted)), w.num(processed)))
     if (s.turnWeighted > 0) parts.push(w.turn(u.isWorking, w.num(Math.round(s.turnWeighted))))
+    const agents = s.agents ?? 0
+    if (agents > 0) parts.push(w.agents(w.num(Math.round(agents))))
   }
   if (u.todayWeighted != null && u.todayWeighted > 0) {
     parts.push(w.today(w.num(Math.round(u.todayWeighted))))
@@ -687,6 +814,7 @@ const reminderAt = async (
 }
 
 const resetAdvice = async ($: EngineInterface): Promise<void> => {
+  await cancelAutoCompact($)
   await update($, advice, () => null)
   await update($, quietUntil, () => 0)
   await update($, isHidden, () => false)
@@ -789,6 +917,78 @@ const compactNow = async ($: EngineInterface, focus: string): Promise<void> => {
   if (problem !== '') await byHand($, focus ? `/compact ${focus}` : '/compact', problem)
 }
 
+// ----------------------------------------------------------- auto-compact
+
+// The `autoCompact` option, in milliseconds (0: off); the timer that waits it
+// out; and whether a main-loop turn runs, from its start to its end.
+let autoCompactMs = 0
+let autoTimer: Timer | undefined
+let isTurnRunning = false
+
+const cancelAutoCompact = async ($: EngineInterface): Promise<void> => {
+  autoTimer?.cancel()
+  autoTimer = undefined
+  if ((await read($, autoCompactAt)) !== 0) await update($, autoCompactAt, () => 0)
+}
+
+// After a main-loop turn that ended on a compact advice (or the person's
+// command while one waits): compact once nothing was sent for the minutes
+// set, if that comes before the cache lapses. Past it the compaction would
+// read the whole conversation at full price, which the cold warning covers.
+const armAutoCompact = async ($: EngineInterface): Promise<void> => {
+  await cancelAutoCompact($)
+  if (autoCompactMs <= 0) return
+  if ((await read($, advice))?.verdict !== 'compact') return
+  const warmth = await read($, cache)
+  const dueAt = (await $.clock.now()) + autoCompactMs
+  if (warmth === null || warmth.isCold || dueAt > warmth.coldAt - AUTO_MARGIN) {
+    log($, 'auto-compact: not armed, the cache lapses first')
+    return
+  }
+  const timer = $.clock.after(autoCompactMs, () => {
+    if (autoTimer !== timer) return
+    autoTimer = undefined
+    later($, 'auto-compact', () => autoCompactIfIdle($))
+  })
+  autoTimer = timer
+  await update($, autoCompactAt, () => dueAt)
+  log($, `auto-compact: due in ${Math.round(autoCompactMs / 1000)} s`)
+}
+
+// Whether a subagent or teammate still works (or waits on the person).
+const agentsAtWork = async ($: EngineInterface): Promise<boolean> => {
+  try {
+    return (await $.agent.list()).some(a => a.status === 'running' || a.status === 'pending' || a.status === 'waiting')
+  } catch (err) {
+    log($, `auto-compact: agents not listed ${errorText(err)}`)
+    return false
+  }
+}
+
+// The timer is up: compact if the advice still says so and nothing runs.
+const autoCompactIfIdle = async ($: EngineInterface): Promise<void> => {
+  await update($, autoCompactAt, () => 0)
+  const given = await read($, advice)
+  if (given?.verdict !== 'compact') return
+  const warmth = await read($, cache)
+  const isWarm = warmth !== null && !warmth.isCold && (await $.clock.now()) < warmth.coldAt
+  const isQuiet =
+    !isTurnRunning &&
+    !(await read($, isBusy)) &&
+    !(await read($, isConfirmingClear)) &&
+    (await read($, handoff)).stage === 'idle'
+  if (!isWarm || !isQuiet || (await agentsAtWork($))) {
+    log($, `auto-compact: skipped (${isWarm ? 'something runs' : 'cache cold'})`)
+    return
+  }
+  try {
+    $.ui.toast(words.autoCompacting(String(Number((autoCompactMs / MINUTE).toFixed(1)))))
+  } catch (err) {
+    log($, `auto-compact: no toast ${errorText(err)}`)
+  }
+  await compactNow($, given.focus)
+}
+
 // Runs /clear; false (with the person told what to do) when it threw.
 const clearConversation = async ($: EngineInterface): Promise<boolean> => {
   log($, 'clear: start')
@@ -844,6 +1044,7 @@ const finishHandoff = async ($: EngineInterface, text: string): Promise<void> =>
   // The note waits in the band until it is in the new conversation's box, so
   // a /clear run by hand still finds it there.
   await update($, handoff, () => ({ stage: 'pending', note: text }))
+  await archiveNote($, text)
   if (await clearConversation($)) await fillNote($, text)
 }
 
@@ -868,6 +1069,8 @@ export const register: Register = (on, options) => {
       : DEFAULT_QUOTA_ALERT
   const showMeter = options.showMeter !== false
   const showUsage = options.showUsage !== false
+  autoCompactMs =
+    typeof options.autoCompact === 'number' && options.autoCompact > 0 ? options.autoCompact * MINUTE : 0
   isLogging = options.debug === true
   words = resolveLang(options.language) === 'en' ? EN : ZH
   let lastDrawn = ''
@@ -896,7 +1099,11 @@ export const register: Register = (on, options) => {
       isDeferred: false,
     })
     try {
-      await $.command.register({ name: COMMAND, description: words.commandDescription })
+      await $.command.register({
+        name: COMMAND,
+        description: words.commandDescription,
+        argumentHint: words.commandHint,
+      })
     } catch (err) {
       log($, `command: not registered ${errorText(err)}`)
     }
@@ -926,6 +1133,10 @@ export const register: Register = (on, options) => {
   // (2) Past the threshold, ask Claude to judge at the end of this turn. The
   // note rides beside the prompt, so the cached conversation stays intact.
   on('prompt.submit', async ($, e, next) => {
+    // Something new arrived: a waiting auto-compaction stands down. A slash
+    // command starts the quiet minutes over instead (a turn it starts stops it).
+    if (e.command && autoTimer !== undefined) await armAutoCompact($)
+    else if (!e.command) await cancelAutoCompact($)
     if (e.command || e.isMeta || !PERSON_ORIGINS.has(e.origin.kind)) return next(e)
 
     if ((await read($, title)) === '' && e.text.trim() !== '') {
@@ -984,12 +1195,24 @@ export const register: Register = (on, options) => {
     }
   })
 
+  // A main-loop turn runs: no auto-compaction until it is over.
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) {
+      isTurnRunning = true
+      await cancelAutoCompact($)
+    }
+
+    return next(e)
+  })
+
   // When the turn that wrote the note ends, clear and carry the note over.
   // The clear waits for a timer: a command can't run inside the turn's end.
+  // Any other turn that ended on a compact advice may start the quiet minutes.
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
     if (e.agentId !== undefined) return done
 
+    isTurnRunning = false
     const carried = await read($, handoff)
     if (carried.stage === 'ready') {
       const text = carried.note
@@ -997,6 +1220,8 @@ export const register: Register = (on, options) => {
     } else if (carried.stage === 'writing') {
       await update($, handoff, () => IDLE)
       $.ui.toast(words.noNote)
+    } else {
+      await armAutoCompact($)
     }
 
     return done
@@ -1035,8 +1260,9 @@ export const register: Register = (on, options) => {
     return response
   })
 
-  // /context-coach: the usage history.
-  on('command.run', { command: COMMAND }, async $ => ({ text: await historyReport($) }))
+  // /context-coach: the usage history; `notes` the saved handoff notes,
+  // `notes 2` the second in full.
+  on('command.run', { command: COMMAND }, async ($, e) => ({ text: await commandReply($, e.args) }))
 
   on('session.end', async ($, e, next) => {
     if (e.reason === 'clear') await afterClear($)
@@ -1258,6 +1484,9 @@ export const register: Register = (on, options) => {
       primary = 'new_session'
     }
 
+    const dueAt = primary === 'compact' && canAct ? await read($, autoCompactAt) : 0
+    const auto = dueAt > 0 ? <Text dimColor>{w.autoAt(clockTime(dueAt))}</Text> : null
+
     const drawn = `band on ${e.surface}: ${headline}${canAct ? ' [buttons]' : ''}`
     if (drawn !== lastDrawn) {
       lastDrawn = drawn
@@ -1292,6 +1521,7 @@ export const register: Register = (on, options) => {
       <Box flexDirection="column">
         <Text bold={primary !== null}>{headline}</Text>
         {given !== null && given.reason !== '' ? <Text dimColor>{given.reason}</Text> : null}
+        {auto}
         {usage}
         {canAct ? (
           <Box flexDirection="row" flexWrap="wrap" gap={1}>
